@@ -34,8 +34,8 @@ def get_realsense_frame(pipeline):
 
     color_image = np.asanyarray(color_frame.get_data())
 
-    # Resize to target resolution (240x240) for EfficientNet-B2
-    color_image_resized = cv.resize(color_image, (240, 240))
+    # Resize to target resolution (260x260) for EfficientNet-B2
+    color_image_resized = cv.resize(color_image, (260, 260))
 
     return True, color_image_resized
 

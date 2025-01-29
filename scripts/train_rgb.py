@@ -41,7 +41,7 @@ class BearCartDataset(Dataset):
         image = cv.imread(img_path, cv.IMREAD_COLOR)
         if image is None:
             raise FileNotFoundError(f"Error: Could not read RGB image at {img_path}")
-        image = cv.resize(image, (240, 240))  # Ensure consistent resolution for RGB image (240, 240)
+        image = cv.resize(image, (260, 260))  # Ensure consistent resolution for RGB image (260, 260)
 
         # Convert RGB image to tensor
         image_tensor = self.transform(image)

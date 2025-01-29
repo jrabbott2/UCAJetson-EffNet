@@ -30,7 +30,7 @@ def build_engine(onnx_file_path, engine_file_path):
 
         # Validate input shape
         input_shape = network.get_input(0).shape
-        expected_shape = (-1, 3, 240, 240)  # Batch size -1 (dynamic), RGB-only channels, 240x240 resolution
+        expected_shape = (-1, 3, 260, 260)  # Batch size -1 (dynamic), RGB-only channels, 260x260 resolution
         if input_shape != expected_shape:
             print(f"Error: The ONNX model's input shape {input_shape} does not match the expected shape {expected_shape}.")
             return None

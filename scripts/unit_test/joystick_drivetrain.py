@@ -11,7 +11,7 @@ from time import sleep
 
 # SETUP
 # Load configs
-params_file_path = os.path.join(os.path.dirname(sys.path[0]), 'configs.json')
+params_file_path = os.path.join(os.path.dirname(sys.path[0]), 'test_config.json')
 params_file = open(params_file_path)
 params = json.load(params_file)
 # Constants
@@ -23,7 +23,7 @@ THROTTLE_STALL = params['throttle_stall']
 THROTTLE_FWD_RANGE = params['throttle_fwd_range']
 THROTTLE_REV_RANGE = params['throttle_rev_range']
 THROTTLE_LIMIT = params['throttle_limit']
-STOP_BUTTON = params['stop_btn']
+STOP_BUTTON = params['stop_btn'] # 'X' button emergency stop
 # Init serial port
 ser_pico = serial.Serial(port='/dev/ttyACM0', baudrate=115200)
 print(f"Pico is connected to port: {ser_pico.name}")
@@ -49,7 +49,7 @@ try:
                     ser_pico.close()
                     sys.exit()
         # Calaculate steering and throttle value
-        act_st = ax_val_st
+        act_st = -ax_val_st
         act_th = -ax_val_th  # throttle action: -1: max forward, 1: max backward
         # Encode steering value to dutycycle in nanosecond
         duty_st = STEERING_CENTER - STEERING_RANGE + int(STEERING_RANGE * (act_st + 1))
@@ -60,6 +60,8 @@ try:
             duty_th = THROTTLE_STALL + int(THROTTLE_REV_RANGE * max(act_th, -THROTTLE_LIMIT))
         else:
             duty_th = THROTTLE_STALL 
+        print(f"Duty Throttle: {duty_th}")
+        print(f"Duty Steering: {duty_st}")
         msg = (str(duty_st) + "," + str(duty_th) + "\n").encode('utf-8')
         # f"{act_st,act_th}\n".encode('utf-8')
         ser_pico.write(msg)

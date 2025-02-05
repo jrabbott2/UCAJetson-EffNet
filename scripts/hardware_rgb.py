@@ -5,6 +5,7 @@ import pyrealsense2 as rs
 import numpy as np
 import json
 import os
+import sys
 
 # Load configuration from config.json
 config_path = os.path.join(os.path.dirname(__file__), "config.json")
@@ -13,12 +14,13 @@ with open(config_path, "r") as config_file:
 
 def setup_realsense_camera():
     """
-    Configure RealSense camera pipeline for RGB stream at 424x240 resolution.
+    Configure RealSense camera pipeline for RGB stream at 480x270 resolution.
     """
     pipeline = rs.pipeline()
     config = rs.config()
-    config.enable_stream(rs.stream.color, 424, 240, rs.format.bgr8, 60)  # RGB stream at 60 FPS
+    config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 60)  # RGB stream at 60 FPS
     pipeline.start(config)
+    print("✅ RealSense camera initialized with 480x270 resolution at 60 FPS")
     return pipeline
 
 def get_realsense_frame(pipeline):
@@ -34,22 +36,30 @@ def get_realsense_frame(pipeline):
 
     color_image = np.asanyarray(color_frame.get_data())
 
-    # Resize to target resolution (260x260) for EfficientNet-B2
-    color_image_resized = cv.resize(color_image, (260, 260))
+    # Resize to target resolution (260x260) for EfficientNet-B2 using INTER_AREA for better quality
+    color_image_resized = cv.resize(color_image, (260, 260), interpolation=cv.INTER_AREA)
 
     return True, color_image_resized
 
-def setup_serial(port, baudrate=115200):
+def setup_serial(port=None, baudrate=115200):
     """
-    Initialize a serial connection.
+    Initialize a serial connection. If port is not specified, attempt automatic detection.
     """
-    try:
-        ser = serial.Serial(port=port, baudrate=baudrate)
-        print(f"Serial connected on {ser.name}")
-        return ser
-    except serial.SerialException as e:
-        print(f"Error opening serial port {port}: {e}")
-        return None
+    if port:
+        ports_to_try = [port]
+    else:
+        ports_to_try = ["/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyACM0", "/dev/ttyACM1"]
+
+    for p in ports_to_try:
+        try:
+            ser = serial.Serial(port=p, baudrate=baudrate)
+            print(f"✅ Serial connected on {ser.name}")
+            return ser
+        except serial.SerialException as e:
+            print(f"⚠️ Error opening serial port {p}: {e}")
+
+    print("❌ No available serial ports found!")
+    return None
 
 def setup_joystick():
     """
@@ -57,10 +67,10 @@ def setup_joystick():
     """
     pygame.joystick.init()
     if pygame.joystick.get_count() == 0:
-        raise Exception("No joystick detected!")
+        raise Exception("❌ No joystick detected!")
     js = pygame.joystick.Joystick(0)
     js.init()
-    print(f"Joystick initialized: {js.get_name()}")
+    print(f"✅ Joystick initialized: {js.get_name()}")
     return js
 
 def encode_dutycylce(ax_val_st, ax_val_th, params):
@@ -100,7 +110,7 @@ if __name__ == "__main__":
     pipeline = setup_realsense_camera()
 
     # Setup serial communication
-    ser = setup_serial("/dev/ttyUSB0")
+    ser = setup_serial()  # Auto-detect serial port if not specified
     if not ser:
         sys.exit(1)
 
@@ -127,13 +137,13 @@ if __name__ == "__main__":
                 elif e.type == pygame.JOYBUTTONDOWN:
                     if e.button == params['record_btn']:
                         is_recording = not is_recording
-                        print("Recording toggled:", "ON" if is_recording else "OFF")
+                        print("🎥 Recording toggled:", "ON" if is_recording else "OFF")
                     elif e.button == params['stop_btn']:
-                        print("E-STOP PRESSED!")
+                        print("🛑 E-STOP PRESSED!")
                         ser.write(b"END,END\n")
                         raise KeyboardInterrupt
                     elif e.button == params['pause_btn']:
-                        print("Paused")
+                        print("⏸️ Paused")
                         cv.waitKey(-1)  # Pause until any key is pressed
 
             # Encode and send steering/throttle commands
@@ -146,7 +156,7 @@ if __name__ == "__main__":
                 break
 
     except KeyboardInterrupt:
-        print("Exiting program.")
+        print("🚪 Exiting program.")
 
     finally:
         # Cleanup resources

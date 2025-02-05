@@ -41,7 +41,7 @@ class BearCartDataset(Dataset):
         image = cv.imread(img_path, cv.IMREAD_COLOR)
         if image is None:
             raise FileNotFoundError(f"Error: Could not read RGB image at {img_path}")
-        image = cv.resize(image, (260, 260))  # Ensure consistent resolution for RGB image (260, 260)
+        image = cv.resize(image, (260, 260), interpolation=cv.INTER_AREA)  # Ensure consistent resolution
 
         # Convert RGB image to tensor
         image_tensor = self.transform(image)
@@ -61,9 +61,9 @@ def train(dataloader, model, loss_fn, optimizer):
         feature, target = im.to(DEVICE), target.to(DEVICE)
         pred = model(feature)
         batch_loss = loss_fn(pred, target)  # Loss function
-        optimizer.zero_grad()  # Zero previous gradient
-        batch_loss.backward()  # Back propagation
-        optimizer.step()  # Update params
+        optimizer.zero_grad()
+        batch_loss.backward()
+        optimizer.step()
         num_used_samples += target.shape[0]
         print(f"batch loss: {batch_loss.item()} [{num_used_samples}/{len(dataloader.dataset)}]")
         ep_loss = (ep_loss * b + batch_loss.item()) / (b + 1)
@@ -77,44 +77,45 @@ def test(dataloader, model, loss_fn):
             target = torch.stack((st, th), dim=-1)
             feature, target = im.to(DEVICE), target.to(DEVICE)
             pred = model(feature)
-            batch_loss = loss_fn(pred, target)  # Loss function
+            batch_loss = loss_fn(pred, target)
             ep_loss = (ep_loss * b + batch_loss.item()) / (b + 1)
     return ep_loss
 
 # Custom loss function (standard MSE)
 def standard_loss(output, target):
-    loss = ((output - target) ** 2).mean()  # Mean Squared Error loss
+    loss = ((output - target) ** 2).mean()
     return loss
 
 # MAIN
 # Create a dataset
 data_dir = os.path.join(os.path.dirname(sys.path[0]), 'data', data_datetime)
 annotations_file = os.path.join(data_dir, 'labels.csv')
-img_dir = os.path.join(data_dir, 'rgb_images')  # RGB images directory
+img_dir = os.path.join(data_dir, 'rgb_images')
 bearcart_dataset = BearCartDataset(annotations_file, img_dir)
-print(f"data length: {len(bearcart_dataset)}")
+print(f"Data length: {len(bearcart_dataset)}")
 
 # Create training and test dataloaders
 train_size = round(len(bearcart_dataset) * 0.9)
 test_size = len(bearcart_dataset) - train_size
-print(f"train size: {train_size}, test size: {test_size}")
+print(f"Train size: {train_size}, Test size: {test_size}")
 train_data, test_data = random_split(bearcart_dataset, [train_size, test_size])
 train_dataloader = DataLoader(train_data, batch_size=125)
 test_dataloader = DataLoader(test_data, batch_size=125)
 
 # Create model
-model = efficientnet_b2(weights=None).to(DEVICE)  # EfficientNet-B2 without pretrained weights
+model = efficientnet_b2(weights=None).to(DEVICE)  # Train from scratch
 model.classifier = nn.Sequential(
-    nn.Linear(model.classifier[1].in_features, 2)  # Modify classifier to output steering and throttle
+    nn.Linear(model.classifier.in_features, 128),
+    nn.ReLU(),
+    nn.Linear(128, 2)
 ).to(DEVICE)
 
-# Hyper-parameters
+# Hyperparameters
 lr = 0.001
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 loss_fn = standard_loss
 epochs = 20
-best_loss = float('inf')  # Best loss on test data
-best_counter = 0
+best_loss = float('inf')
 train_losses = []
 test_losses = []
 
@@ -122,15 +123,17 @@ for t in range(epochs):
     print(f"Epoch {t + 1}\n-------------------------------")
     ep_train_loss = train(train_dataloader, model, loss_fn, optimizer)
     ep_test_loss = test(test_dataloader, model, loss_fn)
-    print(f"epoch {t + 1} training loss: {ep_train_loss}, testing loss: {ep_test_loss}")
+    print(f"Epoch {t + 1} Training loss: {ep_train_loss}, Testing loss: {ep_test_loss}")
     train_losses.append(ep_train_loss)
     test_losses.append(ep_test_loss)
-    # Save the best model
+    
+    # Save best model
     if ep_test_loss < best_loss:
         best_loss = ep_test_loss
         model_name = f'efficientnet_b2-{t+1}ep-{lr}lr-{ep_test_loss:.4f}mse'
-        torch.save(model.state_dict(), os.path.join(data_dir, f'{model_name}.pth'))
-        print(f"Best model saved as '{model_name}.pth'")
+        model_path = os.path.join(data_dir, f'{model_name}.pth')
+        torch.save(model.state_dict(), model_path)
+        print(f"Best model saved as: {model_path}")
 
 print("Optimization Done!")
 
@@ -142,14 +145,17 @@ plt.ylabel('MSE Loss')
 plt.grid(True)
 plt.legend()
 plt.title('EfficientNet-B2 Training')
-plt.savefig(os.path.join(data_dir, 'efficientnet_b2_training.png'))
+graph_path = os.path.join(data_dir, 'efficientnet_b2_training.png')
+plt.savefig(graph_path)
+print(f"Training graph saved at: {graph_path}")
 
-# Save the model (weights only)
-torch.save(model.state_dict(), os.path.join(data_dir, 'efficientnet_b2_final.pth'))
-print("Model weights saved")
+# Save final model
+final_model_path = os.path.join(data_dir, 'efficientnet_b2_final.pth')
+torch.save(model.state_dict(), final_model_path)
+print(f"Final model weights saved at: {final_model_path}")
 
 # ONNX export
-dummy_input = torch.randn(1, 3, 240, 240).to(DEVICE)  # Adjust shape for 240x240 RGB
+dummy_input = torch.randn(1, 3, 260, 260).to(DEVICE)  # Corrected input size
 onnx_model_path = os.path.join(data_dir, 'efficientnet_b2.onnx')
 torch.onnx.export(model, dummy_input, onnx_model_path, opset_version=11)
 print(f"Model exported to ONNX format at: {onnx_model_path}")

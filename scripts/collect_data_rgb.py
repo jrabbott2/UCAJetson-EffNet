@@ -47,7 +47,7 @@ os.makedirs(image_dir, exist_ok=True)
 # Initialize RealSense camera pipeline for RGB only
 pipeline = rs.pipeline()
 config = rs.config()
-config.enable_stream(rs.stream.color, 424, 240, rs.format.bgr8, 60)  # BGR stream with 424x240 resolution at 60 FPS
+config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 60)  # BGR stream with 480x270 resolution at 60 FPS
 
 # Start streaming from the camera
 pipeline.start(config)
@@ -80,7 +80,7 @@ try:
         color_image = np.asanyarray(color_frame.get_data())
 
         # Resize to 260x260 for EfficientNet-B2
-        resized_color_image = cv2.resize(color_image, (260, 260))
+        resized_color_image = cv2.resize(color_image, (260, 260), interpolation=cv2.INTER_AREA)
 
         # Display the RGB image
         cv2.imshow('RealSense Stream - RGB Only', resized_color_image)

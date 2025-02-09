@@ -11,6 +11,8 @@ from torchvision.models import efficientnet_b2
 import cv2 as cv
 import torch.onnx
 
+torch.cuda.set_per_process_memory_fraction(0.7, device=torch.device("cuda:0"))
+
 # Pass in command line arguments for data directory name
 if len(sys.argv) != 2:
     print('Training script needs data!!!')
@@ -18,9 +20,13 @@ if len(sys.argv) != 2:
 else:
     data_datetime = sys.argv[1]
 
-# Designate processing unit for CNN training
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using {DEVICE} device")
+# Check if CUDA is available before setting memory limit
+if torch.cuda.is_available():
+    torch.cuda.set_per_process_memory_fraction(0.7, device=torch.device("cuda:0"))
+    DEVICE = "cuda"
+else:
+    print("⚠️ CUDA is not available! Falling back to CPU.")
+    DEVICE = "cpu"
 
 class BearCartDataset(Dataset):
     """
@@ -29,7 +35,10 @@ class BearCartDataset(Dataset):
     def __init__(self, annotations_file, img_dir):
         self.img_labels = pd.read_csv(annotations_file)
         self.img_dir = img_dir
-        self.transform = v2.ToTensor()
+        self.transform = v2.Compose([
+          v2.ToImage(), 
+          v2.ToDtype(torch.float32, scale=True)  # Equivalent to `ToTensor()`
+        ])
 
     def __len__(self):
         return len(self.img_labels)
@@ -52,22 +61,36 @@ class BearCartDataset(Dataset):
 
         return image_tensor.float(), steering, throttle
 
+import torch
+
 def train(dataloader, model, loss_fn, optimizer):
     model.train()
     num_used_samples = 0
     ep_loss = 0.
+
     for b, (im, st, th) in enumerate(dataloader):
         target = torch.stack((st, th), dim=-1)
-        feature, target = im.to(DEVICE), target.to(DEVICE)
-        pred = model(feature)
-        batch_loss = loss_fn(pred, target)  # Loss function
-        optimizer.zero_grad()
-        batch_loss.backward()
-        optimizer.step()
+        feature, target = im.to("cuda", non_blocking=True), target.to("cuda", non_blocking=True)
+
+        optimizer.zero_grad()  # Zero previous gradient
+
+        # ✅ Enable Mixed Precision Training
+        with torch.cuda.amp.autocast():
+            pred = model(feature)
+            batch_loss = loss_fn(pred, target)
+
+        batch_loss.backward()  # Back propagation
+        optimizer.step()  # Update params
+
         num_used_samples += target.shape[0]
         print(f"batch loss: {batch_loss.item()} [{num_used_samples}/{len(dataloader.dataset)}]")
         ep_loss = (ep_loss * b + batch_loss.item()) / (b + 1)
+
+        # ✅ Prevent Memory Fragmentation
+        torch.cuda.empty_cache()
+
     return ep_loss
+
 
 def test(dataloader, model, loss_fn):
     model.eval()
@@ -99,16 +122,34 @@ train_size = round(len(bearcart_dataset) * 0.9)
 test_size = len(bearcart_dataset) - train_size
 print(f"Train size: {train_size}, Test size: {test_size}")
 train_data, test_data = random_split(bearcart_dataset, [train_size, test_size])
-train_dataloader = DataLoader(train_data, batch_size=125)
-test_dataloader = DataLoader(test_data, batch_size=125)
+train_dataloader = DataLoader(train_data, batch_size=16, pin_memory=True, num_workers=2)
+test_dataloader = DataLoader(test_data, batch_size=16, pin_memory=True, num_workers=2)
+
 
 # Create model
 model = efficientnet_b2(weights=None).to(DEVICE)  # Train from scratch
-model.classifier = nn.Sequential(
-    nn.Linear(model.classifier.in_features, 128),
-    nn.ReLU(),
-    nn.Linear(128, 2)
-).to(DEVICE)
+
+# Print the classifier structure before modifying
+print("Original Classifier Structure:")
+print(model.classifier)
+
+# Modify model classifier (Ensure correct index)
+if isinstance(model.classifier, nn.Sequential):
+    if isinstance(model.classifier[0], nn.Linear):  # If first layer is Linear
+        classifier_input_features = model.classifier[0].in_features
+    elif len(model.classifier) > 1 and isinstance(model.classifier[1], nn.Linear):  # If second layer is Linear
+        classifier_input_features = model.classifier[1].in_features
+    else:
+        raise ValueError("Could not determine classifier input features.")
+
+    model.classifier = nn.Sequential(
+        nn.Linear(classifier_input_features, 128),
+        nn.ReLU(),
+        nn.Linear(128, 2)
+    ).to(DEVICE)
+else:
+    raise ValueError("Unexpected classifier structure!")
+
 
 # Hyperparameters
 lr = 0.001

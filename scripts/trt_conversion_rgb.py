@@ -14,8 +14,12 @@ else:
 # Path to ONNX model inside the given data folder
 onnx_model_path = f"/home/ucajetson/UCAJetson-EffNet/data/{data_datetime}/efficientnet_b2.onnx"
 
+# Ensure output directory exists
+output_dir = "/home/ucajetson/UCAJetson-EffNet/models/"
+os.makedirs(output_dir, exist_ok=True)
+
 # TensorRT engine will be saved with date & time in filename
-trt_engine_path = f"/home/ucajetson/UCAJetson-EffNet/models/TensorRT_EfficientNetB2_RGB_{data_datetime}.trt"
+trt_engine_path = os.path.join(output_dir, f"TensorRT_EfficientNetB2_RGB_{data_datetime}.trt")
 
 # TensorRT logger
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
@@ -32,7 +36,7 @@ def build_engine(onnx_file_path, engine_file_path):
         
         # Create builder config
         config = builder.create_builder_config()
-        config.max_workspace_size = 1 << 30  # 1GB workspace
+        config.max_workspace_size = 1 << 31  # 2GB workspace
         profile = builder.create_optimization_profile()
 
         # Parse the ONNX file
@@ -46,20 +50,25 @@ def build_engine(onnx_file_path, engine_file_path):
         # Validate input shape
         input_tensor = network.get_input(0)
         input_shape = input_tensor.shape
-        expected_shape = (-1, 3, 260, 260)  # Dynamic batch size (-1), RGB channels, 260x260
-        if input_shape[1:] != expected_shape[1:]:  # Ignore batch dimension
+        expected_shape = (1, 3, 260, 260)  # Static batch size, RGB channels, 260x260
+        if input_shape != expected_shape:
             print(f"Error: ONNX model's input shape {input_shape} does not match expected {expected_shape}.")
             return None
         else:
             print(f"✅ Input shape is correct: {input_shape}")
 
         # Define input shape optimization profile
-        profile.set_shape(input_tensor.name, (1, 3, 260, 260), (4, 3, 260, 260), (8, 3, 260, 260))
+        profile.set_shape(input_tensor.name, (1, 3, 260, 260), (1, 3, 260, 260), (1, 3, 260, 260))
         config.add_optimization_profile(profile)
 
         # Build TensorRT engine
         print("Building TensorRT engine. This may take a few minutes...")
-        engine = builder.build_engine(network, config)
+        try:
+            engine = builder.build_engine(network, config)
+        except Exception as e:
+            print(f"❌ Error during engine building: {e}")
+            return None
+
         if engine:
             with open(engine_file_path, "wb") as f:
                 f.write(engine.serialize())

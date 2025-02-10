@@ -1,4 +1,5 @@
 import os
+import torchvision
 import sys
 import numpy as np
 import pandas as pd
@@ -10,8 +11,7 @@ import matplotlib.pyplot as plt
 from torchvision.models import efficientnet_b2
 import cv2 as cv
 import torch.onnx
-
-torch.cuda.set_per_process_memory_fraction(0.7, device=torch.device("cuda:0"))
+import time  # For timing epochs
 
 # Pass in command line arguments for data directory name
 if len(sys.argv) != 2:
@@ -22,8 +22,7 @@ else:
 
 # Check if CUDA is available before setting memory limit
 if torch.cuda.is_available():
-    torch.cuda.set_per_process_memory_fraction(0.7, device=torch.device("cuda:0"))
-    DEVICE = "cuda"
+        DEVICE = "cuda"
 else:
     print("⚠️ CUDA is not available! Falling back to CPU.")
     DEVICE = "cpu"
@@ -63,31 +62,35 @@ class BearCartDataset(Dataset):
 
 import torch
 
-def train(dataloader, model, loss_fn, optimizer):
+scaler = torch.cuda.amp.GradScaler()  # Initialize gradient scaler
+
+def train(dataloader, model, loss_fn, optimizer, accumulation_steps=4):
     model.train()
     num_used_samples = 0
     ep_loss = 0.
+    optimizer.zero_grad()  # Zero previous gradient at the start
 
     for b, (im, st, th) in enumerate(dataloader):
         target = torch.stack((st, th), dim=-1)
         feature, target = im.to("cuda", non_blocking=True), target.to("cuda", non_blocking=True)
 
-        optimizer.zero_grad()  # Zero previous gradient
-
-        # ✅ Enable Mixed Precision Training
-        with torch.cuda.amp.autocast():
+        # ✅ Enable Mixed Precision Training with Gradient Scaling
+        with torch.amp.autocast("cuda"):
             pred = model(feature)
             batch_loss = loss_fn(pred, target)
 
-        batch_loss.backward()  # Back propagation
-        optimizer.step()  # Update params
+        # Scale and accumulate gradients
+        scaler.scale(batch_loss).backward()
+
+        # Perform optimizer step only every `accumulation_steps`
+        if (b + 1) % accumulation_steps == 0 or (b + 1) == len(dataloader):
+            scaler.step(optimizer)               # Step optimizer with scaled gradients
+            scaler.update()                      # Update the scaler
+            optimizer.zero_grad()                # Clear gradients after step
 
         num_used_samples += target.shape[0]
         print(f"batch loss: {batch_loss.item()} [{num_used_samples}/{len(dataloader.dataset)}]")
         ep_loss = (ep_loss * b + batch_loss.item()) / (b + 1)
-
-        # ✅ Prevent Memory Fragmentation
-        torch.cuda.empty_cache()
 
     return ep_loss
 
@@ -122,12 +125,18 @@ train_size = round(len(bearcart_dataset) * 0.9)
 test_size = len(bearcart_dataset) - train_size
 print(f"Train size: {train_size}, Test size: {test_size}")
 train_data, test_data = random_split(bearcart_dataset, [train_size, test_size])
-train_dataloader = DataLoader(train_data, batch_size=16, pin_memory=True, num_workers=2)
-test_dataloader = DataLoader(test_data, batch_size=16, pin_memory=True, num_workers=2)
+train_dataloader = DataLoader(train_data, batch_size=16, pin_memory=True, num_workers=4)
+test_dataloader = DataLoader(test_data, batch_size=16, pin_memory=True, num_workers=4)
 
+# Uncomment ONE of the following model setups at a time to train and compare weights
 
-# Create model
-model = efficientnet_b2(weights=None).to(DEVICE)  # Train from scratch
+# Model with ImageNet pretrained weights
+print("Training model with ImageNet weights...")
+model = efficientnet_b2(weights=torchvision.models.EfficientNet_B2_Weights.IMAGENET1K_V1).to(DEVICE)
+
+# Model with no pretrained weights (training from scratch)
+#print("Training model from scratch (no pretrained weights)...")
+#model = efficientnet_b2(weights=None).to(DEVICE)
 
 # Print the classifier structure before modifying
 print("Original Classifier Structure:")
@@ -154,27 +163,53 @@ else:
 # Hyperparameters
 lr = 0.001
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)  # Reduce LR by 10x every 3 epochs
 loss_fn = standard_loss
-epochs = 20
+epochs = 10
 best_loss = float('inf')
 train_losses = []
 test_losses = []
 
+accumulation_steps = 4  # Accumulate gradients over 4 batches
+
+total_start_time = time.time()  # Start total timer
+
 for t in range(epochs):
     print(f"Epoch {t + 1}\n-------------------------------")
-    ep_train_loss = train(train_dataloader, model, loss_fn, optimizer)
+    epoch_start_time = time.time()  # Start epoch timer
+
+    ep_train_loss = train(train_dataloader, model, loss_fn, optimizer, accumulation_steps=accumulation_steps)
     ep_test_loss = test(test_dataloader, model, loss_fn)
+
+    scheduler.step()  # Step the learning rate scheduler
+
+    epoch_end_time = time.time()  # End epoch timer
+    epoch_time = epoch_end_time - epoch_start_time
+    epoch_mins, epoch_secs = divmod(epoch_time, 60)
     print(f"Epoch {t + 1} Training loss: {ep_train_loss}, Testing loss: {ep_test_loss}")
+    print(f"Epoch {t + 1} took {int(epoch_mins)}m {epoch_secs:.2f}s.")
+
     train_losses.append(ep_train_loss)
     test_losses.append(ep_test_loss)
-    
+
     # Save best model
+    previous_model_path = None
     if ep_test_loss < best_loss:
+        # Delete previous best model if it exists
+        if previous_model_path and os.path.exists(previous_model_path):
+            os.remove(previous_model_path)
+            print(f"Deleted previous best model: {previous_model_path}")
         best_loss = ep_test_loss
         model_name = f'efficientnet_b2-{t+1}ep-{lr}lr-{ep_test_loss:.4f}mse'
         model_path = os.path.join(data_dir, f'{model_name}.pth')
         torch.save(model.state_dict(), model_path)
+        previous_model_path = model_path
         print(f"Best model saved as: {model_path}")
+
+total_end_time = time.time()  # End total timer
+total_time = total_end_time - total_start_time
+total_mins, total_secs = divmod(total_time, 60)
+print(f"Total training time: {int(total_mins)}m {total_secs:.2f}s.")
 
 print("Optimization Done!")
 

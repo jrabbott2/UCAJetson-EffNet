@@ -65,6 +65,11 @@ def infer_tensorrt(image):
     output = np.empty(output_shape, dtype=np.float32)
     cuda.memcpy_dtoh_async(output, d_output, stream)
     stream.synchronize()
+
+    # Force cleanup of CUDA memory
+    del image
+    del output
+    cuda.Context.synchronize()
     
     return output[0]
 
@@ -76,7 +81,6 @@ with open(params_file_path) as params_file:
 # Constants
 STEERING_CENTER = params["steering_center"]
 THROTTLE_STALL = params["throttle_stall"]
-RECORD_BUTTON = params["record_btn"]
 STOP_BUTTON = params["stop_btn"]
 PAUSE_BUTTON = params["pause_btn"]
 
@@ -101,62 +105,42 @@ js = setup_joystick()
 
 is_paused = True
 frame_counts = 0
+previous_steering = None
+previous_throttle = None
+previous_pause_state = None
 
 # Frame rate calculation variables
 prev_time = time()
 frame_count = 0
 fps = 0
 
-def process_joystick():
-    """ Process joystick input asynchronously """
-    global is_paused
-    pygame.init()  # Ensure pygame is initialized here too
-    while True:
-        try:
-            for e in pygame.event.get():
-                if e.type == pygame.JOYBUTTONDOWN:
-                    if js.get_button(PAUSE_BUTTON):
-                        is_paused = not is_paused
-                        print(f"Autopilot {'paused' if is_paused else 'resumed'}.")
-                    elif js.get_button(STOP_BUTTON):
-                        print("E-STOP PRESSED. TERMINATE!")
-                        os._exit(0)
-        except pygame.error as err:
-            print(f"⚠️ Pygame Error: {err}")
-        sleep(0.1)  # Reduce CPU usage
-
-# Start joystick event handling thread
-Thread(target=process_joystick, daemon=True).start()
-
-# MAIN LOOP
 try:
     while True:
-        # Get RGB frame
         ret, frame = get_realsense_frame(cam)
         if not ret or frame is None:
             print("No frame received. TERMINATE!")
             break
-
-        # Run inference using TensorRT
+        
         pred_st, pred_th = infer_tensorrt(frame)
-
-        # Clip predictions to valid range
         st_trim = max(min(float(pred_st), 1.0), -1.0)
         th_trim = max(min(float(pred_th), 1.0), -1.0)
 
-        # Encode and send commands
-        if not is_paused:
-            if ser_pico:
-                msg = encode_dutycylce(st_trim, th_trim, params)
-                ser_pico.write(msg)
-            else:
-                print("⚠️ Warning: Serial not connected. Skipping write.")
-        elif is_paused and frame_counts == 0:  # Only send stall command once
-            if ser_pico:
-                msg = encode_dutycylce(STEERING_CENTER, THROTTLE_STALL, params)
-                ser_pico.write(msg)
+        if is_paused:
+            print("Paused")
+            if previous_pause_state is not True:
+                if ser_pico:
+                    msg = encode_dutycylce(STEERING_CENTER, THROTTLE_STALL, params)
+                    ser_pico.write(msg)
+                previous_pause_state = True
+        else:
+            previous_pause_state = False
+            if (st_trim != previous_steering) or (th_trim != previous_throttle):
+                if ser_pico:
+                    msg = encode_dutycylce(st_trim, th_trim, params)
+                    ser_pico.write(msg)
+                previous_steering = st_trim
+                previous_throttle = th_trim
 
-        # Frame rate calculation and display
         frame_count += 1
         elapsed_time = time() - prev_time
         if elapsed_time >= 1:

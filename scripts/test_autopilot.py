@@ -14,6 +14,10 @@ from hardware_rgb import get_realsense_frame, setup_realsense_camera, setup_seri
 # Adds dummy to run Pygame without a display
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
+# Initialize Pygame early
+pygame.init()
+pygame.joystick.init()
+
 # Pass in command line argument for data folder name (must match TensorRT conversion)
 if len(sys.argv) != 2:
     print("Error: Need to specify the data folder name for TensorRT engine!")
@@ -44,8 +48,8 @@ context = engine.create_execution_context()
 input_shape = (1, 3, 260, 260)  # Batch size 1, RGB channels, 260x260
 output_shape = (1, 2)  # Output: [steering, throttle]
 
-d_input = cuda.mem_alloc(np.prod(input_shape) * np.dtype(np.float32).itemsize)
-d_output = cuda.mem_alloc(np.prod(output_shape) * np.dtype(np.float32).itemsize)
+d_input = cuda.mem_alloc(int(np.prod(input_shape) * np.dtype(np.float32).itemsize))
+d_output = cuda.mem_alloc(int(np.prod(output_shape) * np.dtype(np.float32).itemsize))
 bindings = [int(d_input), int(d_output)]
 stream = cuda.Stream()
 
@@ -77,10 +81,20 @@ STOP_BUTTON = params["stop_btn"]
 PAUSE_BUTTON = params["pause_btn"]
 
 # Initialize hardware
-try:
-    ser_pico = setup_serial(port="/dev/ttyACM0", baudrate=115200)
-except:
-    ser_pico = setup_serial(port="/dev/ttyACM1", baudrate=115200)
+ser_pico = None
+serial_ports = ["/dev/ttyACM0", "/dev/ttyACM1"]
+
+for port in serial_ports:
+    try:
+        ser_pico = setup_serial(port=port, baudrate=115200)
+        if ser_pico:
+            break
+    except:
+        print(f"⚠️ Serial not found on {port}")
+
+if ser_pico is None:
+    print("❌ No available serial ports found! Exiting.")
+    sys.exit(1)
 
 cam = setup_realsense_camera()
 js = setup_joystick()
@@ -96,15 +110,19 @@ fps = 0
 def process_joystick():
     """ Process joystick input asynchronously """
     global is_paused
+    pygame.init()  # Ensure pygame is initialized here too
     while True:
-        for e in pygame.event.get():
-            if e.type == pygame.JOYBUTTONDOWN:
-                if js.get_button(PAUSE_BUTTON):
-                    is_paused = not is_paused
-                    print(f"Autopilot {'paused' if is_paused else 'resumed'}.")
-                elif js.get_button(STOP_BUTTON):
-                    print("E-STOP PRESSED. TERMINATE!")
-                    os._exit(0)
+        try:
+            for e in pygame.event.get():
+                if e.type == pygame.JOYBUTTONDOWN:
+                    if js.get_button(PAUSE_BUTTON):
+                        is_paused = not is_paused
+                        print(f"Autopilot {'paused' if is_paused else 'resumed'}.")
+                    elif js.get_button(STOP_BUTTON):
+                        print("E-STOP PRESSED. TERMINATE!")
+                        os._exit(0)
+        except pygame.error as err:
+            print(f"⚠️ Pygame Error: {err}")
         sleep(0.1)  # Reduce CPU usage
 
 # Start joystick event handling thread
@@ -128,11 +146,15 @@ try:
 
         # Encode and send commands
         if not is_paused:
-            msg = encode_dutycylce(st_trim, th_trim, params)
-            ser_pico.write(msg)
+            if ser_pico:
+                msg = encode_dutycylce(st_trim, th_trim, params)
+                ser_pico.write(msg)
+            else:
+                print("⚠️ Warning: Serial not connected. Skipping write.")
         elif is_paused and frame_counts == 0:  # Only send stall command once
-            msg = encode_dutycylce(STEERING_CENTER, THROTTLE_STALL, params)
-            ser_pico.write(msg)
+            if ser_pico:
+                msg = encode_dutycylce(STEERING_CENTER, THROTTLE_STALL, params)
+                ser_pico.write(msg)
 
         # Frame rate calculation and display
         frame_count += 1

@@ -165,7 +165,7 @@ lr = 0.001
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)  # Reduce LR by 10x every 3 epochs
 loss_fn = standard_loss
-epochs = 10
+epochs = 12
 best_loss = float('inf')
 train_losses = []
 test_losses = []

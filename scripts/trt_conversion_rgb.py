@@ -36,13 +36,19 @@ def build_engine(onnx_file_path, engine_file_path):
         
         # Create builder config
         config = builder.create_builder_config()
-        config.max_workspace_size = 1 << 31  # 2GB workspace
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 31)  # 2GB workspace
         profile = builder.create_optimization_profile()
+
+        # Enable FP16 mode if available
+        if builder.platform_has_fast_fp16:
+            config.set_flag(trt.BuilderFlag.FP16)
+            config.set_flag(trt.BuilderFlag.STRICT_TYPES)
+            print("✅ FP16 mode enabled for TensorRT optimization with selective FP32 fallback.")
 
         # Parse the ONNX file
         with open(onnx_file_path, "rb") as model:
             if not parser.parse(model.read()):
-                print("Failed to parse the ONNX file")
+                print("❌ Failed to parse the ONNX file")
                 for error in range(parser.num_errors):
                     print(parser.get_error(error))
                 return None
@@ -64,14 +70,14 @@ def build_engine(onnx_file_path, engine_file_path):
         # Build TensorRT engine
         print("Building TensorRT engine. This may take a few minutes...")
         try:
-            engine = builder.build_engine(network, config)
+            engine = builder.build_serialized_network(network, config)
         except Exception as e:
             print(f"❌ Error during engine building: {e}")
             return None
 
         if engine:
             with open(engine_file_path, "wb") as f:
-                f.write(engine.serialize())
+                f.write(engine)
             print(f"✅ TensorRT engine saved to: {engine_file_path}")
         else:
             print("❌ Failed to build the TensorRT engine.")

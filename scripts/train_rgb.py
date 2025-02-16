@@ -40,17 +40,18 @@ class BearCartDataset(Dataset):
     def __getitem__(self, idx):
         img_name = self.img_labels.iloc[idx, 0]
         img_path = os.path.join(self.img_dir, img_name)
-        image = cv.imread(img_path, cv.IMREAD_COLOR)
 
+        image = cv.imread(img_path, cv.IMREAD_COLOR)
         if image is None:
-            raise FileNotFoundError(f"❌ Error: Could not read image at {img_path}")
+            raise FileNotFoundError(f"❌ Error: Could not read image {img_path}")
 
         image = cv.resize(image, (260, 260), interpolation=cv.INTER_AREA)
-        image_tensor = self.transform(image)
-        steering = self.img_labels.iloc[idx, 1].astype(np.float32)
-        throttle = self.img_labels.iloc[idx, 2].astype(np.float32)
 
-        return image_tensor.float(), steering, throttle
+        # ✅ Fix: Ensure labels are a PyTorch tensor instead of a pandas Series
+        labels = self.img_labels.iloc[idx, 1:].values.astype(np.float32)
+        labels_tensor = torch.tensor(labels, dtype=torch.float32)
+
+        return self.transform(image), labels_tensor
 
 # Create dataset paths
 data_dir = os.path.join(os.path.dirname(sys.path[0]), 'data', data_datetime)
@@ -64,8 +65,8 @@ test_size = len(bearcart_dataset) - train_size
 train_data, test_data = random_split(bearcart_dataset, [train_size, test_size])
 
 # Optimized DataLoaders
-train_dataloader = DataLoader(train_data, batch_size=16, pin_memory=True, num_workers=6, shuffle=True)
-test_dataloader = DataLoader(test_data, batch_size=16, pin_memory=True, num_workers=6)
+train_dataloader = DataLoader(train_data, batch_size=16, pin_memory=True, num_workers=4, shuffle=True)
+test_dataloader = DataLoader(test_data, batch_size=16, pin_memory=True, num_workers=4)
 
 print(f"✅ Dataset loaded. Training size: {train_size}, Testing size: {test_size}")
 
@@ -86,22 +87,30 @@ model.classifier = nn.Sequential(
 ).to(DEVICE)
 
 # Mixed Precision Training for Jetson Performance
-scaler = torch.cuda.amp.GradScaler()
+scaler = torch.amp.GradScaler(device="cuda")
 
 # Loss & Optimizer
 loss_fn = nn.MSELoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
 
-# Training Function (Mixed Precision)
+# Training Function (Cleaner Batch Print)
 def train(dataloader, model, loss_fn, optimizer, accumulation_steps=4):
     model.train()
     ep_loss = 0.
     optimizer.zero_grad()
+    
+    num_samples = len(dataloader.dataset)
+    processed_samples = 0
+    start_time = time.time()
 
-    for b, (im, st, th) in enumerate(dataloader):
-        target = torch.stack((st, th), dim=-1)
-        feature, target = im.to(DEVICE, non_blocking=True), target.to(DEVICE, non_blocking=True)
+    print("\n📊 Training Progress:")
+    print(f"{'Batch':<8}{'Loss':<15}{'Processed':<20}{'Completion %':<15}{'ETA'}")
+    print("-" * 75)
+
+    for b, (im, labels) in enumerate(dataloader):
+        batch_size = im.size(0)
+        feature, target = im.to(DEVICE, non_blocking=True), labels.to(DEVICE, non_blocking=True)
 
         with torch.amp.autocast("cuda"):
             pred = model(feature)
@@ -115,7 +124,16 @@ def train(dataloader, model, loss_fn, optimizer, accumulation_steps=4):
             optimizer.zero_grad()
 
         ep_loss += batch_loss.item()
-    
+        processed_samples += batch_size
+
+        # Calculate ETA
+        elapsed_time = time.time() - start_time
+        percent_complete = (processed_samples / num_samples) * 100
+        estimated_time_remaining = (elapsed_time / (b + 1)) * (len(dataloader) - (b + 1))
+
+        # Print structured progress
+        print(f"{b+1:<8}{batch_loss.item():<15.6f}{processed_samples:<20}{percent_complete:<15.2f}{estimated_time_remaining:.1f}s")
+
     return ep_loss / len(dataloader)
 
 # Testing Function
@@ -123,9 +141,8 @@ def test(dataloader, model, loss_fn):
     model.eval()
     ep_loss = 0.
     with torch.no_grad():
-        for im, st, th in dataloader:
-            target = torch.stack((st, th), dim=-1)
-            feature, target = im.to(DEVICE), target.to(DEVICE)
+        for im, labels in dataloader:
+            feature, target = im.to(DEVICE), labels.to(DEVICE)
             pred = model(feature)
             ep_loss += loss_fn(pred, target).item()
     return ep_loss / len(dataloader)
@@ -137,8 +154,8 @@ train_losses, test_losses = [], []
 total_start_time = time.time()
 
 for t in range(epochs):
-    print(f"Epoch {t + 1}\n-------------------------------")
-    start_time = time.time()
+    print(f"\n📢 Epoch {t + 1} -------------------------------")
+    epoch_start_time = time.time()
 
     ep_train_loss = train(train_dataloader, model, loss_fn, optimizer, accumulation_steps=4)
     ep_test_loss = test(test_dataloader, model, loss_fn)
@@ -148,8 +165,8 @@ for t in range(epochs):
     train_losses.append(ep_train_loss)
     test_losses.append(ep_test_loss)
     
-    epoch_time = time.time() - start_time
-    print(f"Epoch {t + 1}: Train Loss = {ep_train_loss:.5f}, Test Loss = {ep_test_loss:.5f}, Time: {epoch_time:.2f}s")
+    epoch_time = time.time() - epoch_start_time
+    print(f"✅ Epoch {t + 1}: Train Loss = {ep_train_loss:.5f}, Test Loss = {ep_test_loss:.5f}, Time: {epoch_time:.2f}s")
 
     if ep_test_loss < best_loss:
         best_loss = ep_test_loss
@@ -161,22 +178,3 @@ for t in range(epochs):
 final_model_path = os.path.join(data_dir, 'efficientnet_b2_final.pth')
 torch.save(model.state_dict(), final_model_path)
 print(f"✅ Final model weights saved at: {final_model_path}")
-
-# Graph training process
-plt.plot(range(epochs), train_losses, 'b--', label='Training')
-plt.plot(range(epochs), test_losses, 'orange', label='Test')
-plt.xlabel('Epoch')
-plt.ylabel('MSE Loss')
-plt.legend()
-plt.title('EfficientNet-B2 Training')
-plt.grid(True)
-graph_path = os.path.join(data_dir, 'efficientnet_b2_training.png')
-plt.savefig(graph_path)
-print(f"📊 Training graph saved at: {graph_path}")
-
-# ONNX Export
-onnx_model_path = os.path.join(data_dir, 'efficientnet_b2.onnx')
-torch.onnx.export(model, torch.randn(1, 3, 260, 260).to(DEVICE), onnx_model_path, opset_version=11)
-print(f"✅ Model exported to ONNX at: {onnx_model_path}")
-
-print("🎯 Training Complete!")

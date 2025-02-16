@@ -47,7 +47,7 @@ os.makedirs(image_dir, exist_ok=True)
 # Initialize RealSense camera pipeline for RGB only
 pipeline = rs.pipeline()
 config = rs.config()
-config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 60)  # BGR stream with 480x270 resolution at 60 FPS
+config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 30)  # BGR stream with 480x270 resolution at 30 FPS
 
 # Start streaming from the camera
 pipeline.start(config)

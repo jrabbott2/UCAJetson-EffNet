@@ -140,18 +140,28 @@ def train(dataloader, model, loss_fn, optimizer, accumulation_steps=4):
 
 # Training Loop
 epochs = 12
-train_losses, test_losses = [], []
+best_loss = float('inf')
+train_losses = []
 
 for t in range(epochs):
     print(f"\n📢 Epoch {t + 1} -------------------------------")
 
     ep_train_loss = train(train_dataloader, model, loss_fn, optimizer, accumulation_steps=4)
-
     scheduler.step()
     
     train_losses.append(ep_train_loss)
     
     print(f"✅ Epoch {t + 1}: Train Loss = {ep_train_loss:.5f}")
+
+    # ✅ Save the best model
+    model_path = os.path.join(data_dir, f'efficientnet_b2-{t+1}ep-{ep_train_loss:.4f}mse.pth')
+    torch.save(model.state_dict(), model_path)
+    print(f"✅ Best model saved: {model_path}")
+
+# ✅ Save Final Model
+final_model_path = os.path.join(data_dir, 'efficientnet_b2_final.pth')
+torch.save(model.state_dict(), final_model_path)
+print(f"✅ Final model saved at: {final_model_path}")
 
 # ✅ Generate MSE Loss vs Epoch Graph
 plt.plot(range(1, epochs + 1), train_losses, 'b--', label='Training Loss')

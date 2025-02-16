@@ -6,53 +6,55 @@ import numpy as np
 import json
 import os
 import sys
+from threading import Thread
 
-# Load configuration from config.json
+# Load configuration
 config_path = os.path.join(os.path.dirname(__file__), "config.json")
 with open(config_path, "r") as config_file:
     params = json.load(config_file)
 
 def setup_realsense_camera():
     """
-    Configure RealSense camera pipeline for RGB stream at 480x270 resolution.
+    Configure RealSense camera pipeline for RGB stream at 480x270 resolution at 30 FPS.
     """
     pipeline = rs.pipeline()
     config = rs.config()
-    config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 60)  # RGB stream at 60 FPS
+    config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 30)  # ✅ Set to 30 FPS
     pipeline.start(config)
-    print("✅ RealSense camera initialized with 480x270 resolution at 60 FPS")
+    print("✅ RealSense camera initialized with 480x270 resolution at 30 FPS")
     return pipeline
 
 def get_realsense_frame(pipeline):
     """
-    Capture frames from the RealSense camera pipeline.
+    Capture frames from RealSense camera with improved stability.
     Returns resized color frame as a NumPy array.
     """
-    frames = pipeline.wait_for_frames()
-    color_frame = frames.get_color_frame()
+    try:
+        frames = pipeline.wait_for_frames()
+        color_frame = frames.get_color_frame()
 
-    if not color_frame:
+        if not color_frame:
+            return False, None
+
+        color_image = np.asanyarray(color_frame.get_data())
+
+        # Resize to target resolution (260x260) for EfficientNet-B2 with INTER_AREA for better quality
+        color_image_resized = cv.resize(color_image, (260, 260), interpolation=cv.INTER_AREA)
+
+        return True, color_image_resized
+    except Exception as e:
+        print(f"⚠️ RealSense Frame Capture Error: {e}")
         return False, None
-
-    color_image = np.asanyarray(color_frame.get_data())
-
-    # Resize to target resolution (260x260) for EfficientNet-B2 using INTER_AREA for better quality
-    color_image_resized = cv.resize(color_image, (260, 260), interpolation=cv.INTER_AREA)
-
-    return True, color_image_resized
 
 def setup_serial(port=None, baudrate=115200):
     """
     Initialize a serial connection. If port is not specified, attempt automatic detection.
     """
-    if port:
-        ports_to_try = [port]
-    else:
-        ports_to_try = ["/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyACM0", "/dev/ttyACM1"]
+    ports_to_try = [port] if port else ["/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyACM0", "/dev/ttyACM1"]
 
     for p in ports_to_try:
         try:
-            ser = serial.Serial(port=p, baudrate=baudrate)
+            ser = serial.Serial(port=p, baudrate=baudrate, timeout=0.1)  # ✅ Timeout prevents hangs
             print(f"✅ Serial connected on {ser.name}")
             return ser
         except serial.SerialException as e:
@@ -105,19 +107,49 @@ def encode(duty_st, duty_th):
     """
     return f"{duty_st},{duty_th}\n".encode('utf-8')
 
+def process_joystick(js, ser):
+    """
+    Handle joystick input in a separate thread for non-blocking execution.
+    """
+    is_recording = False
+
+    while True:
+        for e in pygame.event.get():
+            if e.type == pygame.JOYAXISMOTION:
+                ax_val_st = js.get_axis(params['steering_joy_axis'])
+                ax_val_th = js.get_axis(params['throttle_joy_axis'])
+                msg = encode_dutycylce(ax_val_st, ax_val_th, params)
+                if ser:
+                    ser.write(msg)  # ✅ Non-blocking Serial Writing
+
+            elif e.type == pygame.JOYBUTTONDOWN:
+                if e.button == params['record_btn']:
+                    is_recording = not is_recording
+                    print(f"🎥 Recording {'ON' if is_recording else 'OFF'}")
+                elif e.button == params['stop_btn']:
+                    print("🛑 E-STOP PRESSED! Terminating.")
+                    ser.write(b"END,END\n")
+                    os._exit(0)
+                elif e.button == params['pause_btn']:
+                    print("⏸️ Paused")
+                    cv.waitKey(-1)  # Pause until any key is pressed
+
+        sleep(0.05)  # ✅ Prevents CPU overuse
+
 if __name__ == "__main__":
     # Setup RealSense camera
     pipeline = setup_realsense_camera()
 
     # Setup serial communication
-    ser = setup_serial()  # Auto-detect serial port if not specified
+    ser = setup_serial()
     if not ser:
         sys.exit(1)
 
     # Setup joystick
     js = setup_joystick()
 
-    is_recording = False
+    # Start joystick processing in a separate thread
+    Thread(target=process_joystick, args=(js, ser), daemon=True).start()
 
     try:
         while True:
@@ -128,28 +160,6 @@ if __name__ == "__main__":
 
             # Display color frame
             cv.imshow('RGB Stream', color_frame)
-
-            # Handle joystick events
-            for e in pygame.event.get():
-                if e.type == pygame.JOYAXISMOTION:
-                    ax_val_st = js.get_axis(params['steering_joy_axis'])
-                    ax_val_th = js.get_axis(params['throttle_joy_axis'])
-                elif e.type == pygame.JOYBUTTONDOWN:
-                    if e.button == params['record_btn']:
-                        is_recording = not is_recording
-                        print("🎥 Recording toggled:", "ON" if is_recording else "OFF")
-                    elif e.button == params['stop_btn']:
-                        print("🛑 E-STOP PRESSED!")
-                        ser.write(b"END,END\n")
-                        raise KeyboardInterrupt
-                    elif e.button == params['pause_btn']:
-                        print("⏸️ Paused")
-                        cv.waitKey(-1)  # Pause until any key is pressed
-
-            # Encode and send steering/throttle commands
-            if 'ax_val_st' in locals() and 'ax_val_th' in locals():
-                msg = encode_dutycylce(ax_val_st, ax_val_th, params)
-                ser.write(msg)
 
             # Exit the loop if 'q' is pressed
             if cv.waitKey(1) & 0xFF == ord('q'):

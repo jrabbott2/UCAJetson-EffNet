@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import warnings
 import numpy as np
 import pandas as pd
 import torch
@@ -8,9 +9,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
 from torchvision import transforms
 import cv2
-from torch.cuda.amp import GradScaler, autocast
 import matplotlib.pyplot as plt
 import torch.onnx
+
+# Suppress matplotlib warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
 
 # Custom model import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -61,7 +64,7 @@ def train_epoch(dataloader, model, optimizer, scaler):
     for b, (x, y) in enumerate(dataloader):
         x, y = x.to(DEVICE), y.to(DEVICE)
         
-        with autocast():
+        with torch.amp.autocast(device_type='cuda'):  # Updated autocast
             loss = nn.MSELoss()(model(x), y)
         
         scaler.scale(loss).backward()
@@ -125,14 +128,19 @@ if __name__ == "__main__":
         {'params': model.base_model.classifier.parameters(), 'lr': 1e-3}
     ], weight_decay=1e-4)
     
+    # Updated scheduler without verbose parameter
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, 'min', patience=2, factor=0.5, verbose=True)
-    scaler = GradScaler()
+        optimizer, 'min', patience=2, factor=0.5
+    )
+    
+    # Updated GradScaler initialization
+    scaler = torch.amp.GradScaler(device_type='cuda')
 
     # Training loop
     best_loss = float('inf')
     train_losses = []
     val_losses = []
+    previous_lr = None
     
     for epoch in range(1, EPOCHS+1):
         print(f"\nEpoch {epoch}/{EPOCHS}")
@@ -145,6 +153,12 @@ if __name__ == "__main__":
         val_loss = validate(val_loader, model)
         val_losses.append(val_loss)
         scheduler.step(val_loss)
+        
+        # Print learning rate changes
+        current_lr = optimizer.param_groups[0]['lr']
+        if previous_lr is not None and current_lr != previous_lr:
+            print(f"Learning rate updated from {previous_lr:.2e} to {current_lr:.2e}")
+        previous_lr = current_lr
         
         # Save best model
         if val_loss < best_loss:

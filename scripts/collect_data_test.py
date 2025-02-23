@@ -1,180 +1,174 @@
 import os
 import sys
 import json
-import csv
 import time
-from datetime import datetime
 import pygame
+import cv2
 import pyrealsense2 as rs
 import numpy as np
-import cv2
 import serial
-from threading import Thread
-from queue import Queue
+from threading import Thread, Lock
+from time import sleep
 
-# Load configs
-params_file_path = os.path.join(sys.path[0], 'config.json')
-with open(params_file_path) as params_file:
-    params = json.load(params_file)
+# Load configuration
+config_path = os.path.join(os.path.dirname(__file__), "config.json")
+with open(config_path, "r") as config_file:
+    params = json.load(config_file)
 
-# Constants
-STEERING_AXIS = params['steering_joy_axis']
-STEERING_CENTER = params['steering_center']
-STEERING_RANGE = params['steering_range']
-THROTTLE_AXIS = params['throttle_joy_axis']
-THROTTLE_STALL = params['throttle_stall']
-THROTTLE_FWD_RANGE = params['throttle_fwd_range']
-THROTTLE_REV_RANGE = params['throttle_rev_range']
-THROTTLE_LIMIT = params['throttle_limit']
-RECORD_BUTTON = params['record_btn']
-STOP_BUTTON = params['stop_btn']
+# Global variables for inter-thread communication
+current_frame = None
+frame_lock = Lock()
+joystick_events = []
+event_lock = Lock()
 
-# Initialize hardware
-def init_serial():
-    ports = ['/dev/ttyACM0', '/dev/ttyACM1']
-    for port in ports:
-        try:
-            return serial.Serial(port=port, baudrate=115200, timeout=0.1)
-        except serial.SerialException:
-            continue
-    raise RuntimeError("No microcontroller found!")
+def setup_realsense_camera():
+    """Configure RealSense camera pipeline for RGB stream."""
+    pipeline = rs.pipeline()
+    config = rs.config()
+    config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 30)
+    pipeline.start(config)
+    print("✅ RealSense camera initialized")
+    return pipeline
 
-ser_pico = init_serial()
-
-# Initialize Pygame for joystick
-pygame.init()
-pygame.joystick.init()
-js = pygame.joystick.Joystick(0)
-js.init()
-
-# Data saving setup
-data_dir = os.path.join('data', datetime.now().strftime("%Y-%m-%d-%H-%M"))
-image_dir = os.path.join(data_dir, 'rgb_images')
-os.makedirs(image_dir, exist_ok=True)
-
-# RealSense pipeline configuration
-pipeline = rs.pipeline()
-config = rs.config()
-config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 30)
-
-# Start pipeline with warmup
-pipeline.start(config)
-warmup_frames = 90  # 3 seconds at 30 FPS
-for _ in range(warmup_frames):
-    pipeline.wait_for_frames()
-
-# Thread-safe data saving queue
-save_queue = Queue(maxsize=100)
-stop_signal = object()
-
-# Pre-allocated image buffer
-resized_buffer = np.empty((260, 260, 3), dtype=np.uint8)
-
-def save_worker():
-    csv_file = open(os.path.join(data_dir, 'labels.csv'), 'a', newline='')
-    writer = csv.writer(csv_file)
-    
-    while True:
-        item = save_queue.get()
-        if item is stop_signal:
-            break
-        img_path, image, row = item
-        cv2.imwrite(img_path, image, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        writer.writerow(row)
-        if save_queue.qsize() % 10 == 0:  # Flush periodically
-            csv_file.flush()
-    
-    csv_file.close()
-
-# Start save worker thread
-saver_thread = Thread(target=save_worker, daemon=True)
-saver_thread.start()
-
-# Main loop variables
-is_recording = False
-frame_counts = 0
-last_display_time = time.time()
-display_interval = 0.1  # Update display at 10 FPS
-
-try:
-    while True:
-        # Get frames without blocking (use poll instead of wait_for_frames)
-        frames = pipeline.try_wait_for_frames(timeout_ms=50)
-        if not frames:
-            continue
-
+def get_realsense_frame(pipeline):
+    """Capture frames from RealSense camera."""
+    global current_frame
+    try:
+        frames = pipeline.wait_for_frames()
         color_frame = frames.get_color_frame()
         if not color_frame:
-            continue
-
-        # Process image
+            return False
+        
         color_image = np.asanyarray(color_frame.get_data())
-        cv2.resize(color_image, (260, 260), dst=resized_buffer, interpolation=cv2.INTER_AREA)
+        with frame_lock:
+            current_frame = cv2.resize(color_image, (260, 260), interpolation=cv2.INTER_AREA)
+        return True
+    except Exception as e:
+        print(f"⚠️ Frame capture error: {e}")
+        return False
 
-        # Throttled display
-        current_time = time.time()
-        if current_time - last_display_time > display_interval:
-            cv2.imshow('Preview', resized_buffer)
-            last_display_time = current_time
+def setup_serial():
+    """Initialize serial connection."""
+    ports = ["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyUSB0"]
+    for port in ports:
+        try:
+            ser = serial.Serial(port=port, baudrate=115200, timeout=0.1)
+            print(f"✅ Serial connected on {port}")
+            return ser
+        except serial.SerialException:
+            continue
+    print("❌ No serial devices found!")
+    return None
 
-        # Direct joystick polling (no event loop)
-        ax_val_st = round(js.get_axis(STEERING_AXIS), 2)
-        ax_val_th = round(js.get_axis(THROTTLE_AXIS), 2)
+def setup_joystick():
+    """Initialize and return the first detected joystick."""
+    pygame.init()
+    pygame.joystick.init()
+    
+    if pygame.joystick.get_count() == 0:
+        raise RuntimeError("❌ No joystick detected!")
+    
+    js = pygame.joystick.Joystick(0)
+    js.init()
+    print(f"✅ Joystick initialized: {js.get_name()}")
+    return js
 
-        # Handle buttons
-        if js.get_button(RECORD_BUTTON):
-            is_recording = not is_recording
-            print(f"Recording {'STARTED' if is_recording else 'STOPPED'}")
-            time.sleep(0.3)  # Debounce
-
-        if js.get_button(STOP_BUTTON):
-            print("E-STOP ACTIVATED")
-            ser_pico.write(b"END,END\n")
-            raise KeyboardInterrupt
-
-        # Calculate control values
-        act_st = -ax_val_st
-        act_th = -ax_val_th
-
-        if act_th > 0:
-            duty_th = THROTTLE_STALL + int((THROTTLE_FWD_RANGE - THROTTLE_STALL) * act_th)
-        elif act_th < 0:
-            duty_th = THROTTLE_STALL - int((THROTTLE_STALL - THROTTLE_REV_RANGE) * abs(act_th))
-        else:
-            duty_th = THROTTLE_STALL
-
-        duty_st = STEERING_CENTER - STEERING_RANGE + int(STEERING_RANGE * (act_st + 1))
-
-        # Send controls
-        ser_pico.write(f"{duty_st},{duty_th}\n".encode('utf-8'))
-
-        # Save data
-        if is_recording:
-            img_name = f"{frame_counts}_rgb.jpg"
-            img_path = os.path.join(image_dir, img_name)
+def process_joystick(ser, params):
+    """Handle joystick data processing in a separate thread."""
+    global current_frame
+    is_recording = False
+    frame_count = 0
+    data_dir = os.path.join('data', time.strftime("%Y-%m-%d-%H-%M"))
+    os.makedirs(data_dir, exist_ok=True)
+    
+    while True:
+        events = []
+        with event_lock:
+            events = joystick_events.copy()
+            joystick_events.clear()
+        
+        for e in events:
+            if e.type == pygame.JOYAXISMOTION:
+                ax_val_st = e.value if e.axis == params['steering_joy_axis'] else 0
+                ax_val_th = e.value if e.axis == params['throttle_joy_axis'] else 0
+                
+                # Send controls
+                if ser:
+                    msg = encode_dutycycle(ax_val_st, ax_val_th, params)
+                    ser.write(msg)
+                
+                # Save data if recording
+                if is_recording and current_frame is not None:
+                    img_dir = os.path.join(data_dir, 'rgb_images')
+                    os.makedirs(img_dir, exist_ok=True)
+                    img_path = os.path.join(img_dir, f"{frame_count}_rgb.jpg")
+                    label_path = os.path.join(data_dir, 'labels.csv')
+                    
+                    cv2.imwrite(img_path, current_frame)
+                    with open(label_path, 'a') as f:
+                        f.write(f"{frame_count}_rgb.jpg,{ax_val_st:.4f},{ax_val_th:.4f}\n")
+                    frame_count += 1
             
-            try:
-                save_queue.put_nowait((
-                    img_path,
-                    resized_buffer.copy(),  # Copy from pre-allocated buffer
-                    [img_name, ax_val_st, ax_val_th]
-                ))
-                frame_counts += 1
-            except:
-                print("Queue full - dropped frame!")
+            elif e.type == pygame.JOYBUTTONDOWN:
+                if e.button == params['record_btn']:
+                    is_recording = not is_recording
+                    print(f"🎥 Recording {'started' if is_recording else 'stopped'}")
+                elif e.button == params['stop_btn']:
+                    print("🛑 E-STOP PRESSED! Terminating.")
+                    if ser:
+                        ser.write(b"END,END\n")
+                    os._exit(0)
+        
+        sleep(0.05)
 
-        # Exit check
-        if cv2.pollKey() == ord('q'):
-            break
+def encode_dutycycle(ax_val_st, ax_val_th, params):
+    """Calculate duty cycle for steering and throttle."""
+    st_center = params['steering_center']
+    st_range = params['steering_range']
+    th_stall = params['throttle_stall']
+    th_fwd = params['throttle_fwd_range']
+    th_rev = params['throttle_rev_range']
 
-except KeyboardInterrupt:
-    print("\nShutting down...")
+    # Steering calculation
+    duty_st = st_center - st_range + int(st_range * (-ax_val_st + 1))
+    
+    # Throttle calculation
+    if ax_val_th > 0:
+        duty_th = th_stall + int((th_fwd - th_stall) * ax_val_th)
+    elif ax_val_th < 0:
+        duty_th = th_stall - int((th_stall - th_rev) * abs(ax_val_th))
+    else:
+        duty_th = th_stall
+    
+    return f"{duty_st},{duty_th}\n".encode()
 
-finally:
-    pipeline.stop()
-    pygame.quit()
-    ser_pico.close()
-    cv2.destroyAllWindows()
-    save_queue.put(stop_signal)
-    saver_thread.join(timeout=5)
-    print(f"Saved {frame_counts} frames to {data_dir}")
+if __name__ == "__main__":
+    # Initialize hardware
+    pipeline = setup_realsense_camera()
+    ser = setup_serial()
+    js = setup_joystick()
+    
+    # Start processing thread
+    Thread(target=process_joystick, args=(ser, params), daemon=True).start()
+
+    try:
+        while True:
+            # Capture events in main thread
+            with event_lock:
+                joystick_events.extend(pygame.event.get())
+            
+            # Update camera feed
+            if get_realsense_frame(pipeline) and current_frame is not None:
+                cv2.imshow('RGB Stream', current_frame)
+            
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+    except KeyboardInterrupt:
+        print("🚪 Exiting program.")
+    finally:
+        pipeline.stop()
+        pygame.quit()
+        if ser:
+            ser.close()
+        cv2.destroyAllWindows()

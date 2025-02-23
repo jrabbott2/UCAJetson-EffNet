@@ -11,6 +11,7 @@ from torchvision import transforms
 import cv2
 import matplotlib.pyplot as plt
 import torch.onnx
+from torch.cuda.amp import GradScaler, autocast  # Correct AMP imports
 
 # Suppress matplotlib warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
@@ -64,7 +65,7 @@ def train_epoch(dataloader, model, optimizer, scaler):
     for b, (x, y) in enumerate(dataloader):
         x, y = x.to(DEVICE), y.to(DEVICE)
         
-        with torch.amp.autocast(device_type='cuda'):  # Updated autocast
+        with autocast():  # Correct autocast context
             loss = nn.MSELoss()(model(x), y)
         
         scaler.scale(loss).backward()
@@ -128,13 +129,11 @@ if __name__ == "__main__":
         {'params': model.base_model.classifier.parameters(), 'lr': 1e-3}
     ], weight_decay=1e-4)
     
-    # Updated scheduler without verbose parameter
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 'min', patience=2, factor=0.5
     )
     
-    # Updated GradScaler initialization
-    scaler = torch.amp.GradScaler(device_type='cuda')
+    scaler = GradScaler()  # Correct GradScaler initialization
 
     # Training loop
     best_loss = float('inf')

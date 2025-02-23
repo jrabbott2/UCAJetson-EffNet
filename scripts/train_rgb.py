@@ -26,7 +26,7 @@ if DEVICE == "cpu":
 
 class BearCartDataset(Dataset):
     """Dataset loader for RGB images and steering/throttle labels."""
-    def __init__(self, annotations_file, img_dir):
+    def __init__(self, annotations_file, img_dir):                          
         self.img_labels = pd.read_csv(annotations_file)
         self.img_dir = img_dir
         self.transform = v2.Compose([

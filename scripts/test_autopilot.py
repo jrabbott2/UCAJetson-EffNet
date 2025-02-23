@@ -5,159 +5,107 @@ import pycuda.driver as cuda
 import pycuda.autoinit
 import numpy as np
 import tensorrt as trt
-import pygame
-import cv2 as cv
-from time import time, sleep
-from hardware_rgb import (
-    get_realsense_frame, setup_realsense_camera, setup_serial, 
-    setup_joystick, encode_dutycylce
-)
+import cv2
+from hardware_test import HardwareController  # Updated import
 
-# Pygame Dummy Display (Prevent UI issues)
-os.environ["SDL_VIDEODRIVER"] = "dummy"
-pygame.init()
-pygame.joystick.init()
-
-# Ensure correct CLI input
-if len(sys.argv) != 2:
-    print("❌ Error: Need to specify the model's timestamp folder!")
-    sys.exit(1)
-else:
-    data_datetime = sys.argv[1]  # Example: "2025-02-16-15-30"
-
-# Load TensorRT engine
-engine_path = f"models/TensorRT_EfficientNetB2_RGB_{data_datetime}.trt"
-if not os.path.exists(engine_path):
-    print(f"❌ TensorRT model file not found: {engine_path}")
-    sys.exit(1)
-
-print(f"🔄 Loading TensorRT model from {engine_path}...")
-
-# TensorRT Logger
+# TensorRT Initialization
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
 
-# Load TensorRT engine
-def load_trt_engine(engine_path):
-    with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
-        return runtime.deserialize_cuda_engine(f.read())
+class TensorRTInference:
+    def __init__(self, engine_path):
+        self.engine = self.load_engine(engine_path)
+        self.context = self.engine.create_execution_context()
+        self.stream = cuda.Stream()
+        
+        # Allocate device memory
+        self.input_shape = self.engine.get_tensor_shape(self.engine.get_tensor_name(0))
+        self.output_shape = self.engine.get_tensor_shape(self.engine.get_tensor_name(1))
+        
+        self.d_input = cuda.mem_alloc(int(np.prod(self.input_shape)) * 2)  # FP16
+        self.d_output = cuda.mem_alloc(int(np.prod(self.output_shape)) * 2)
 
-engine = load_trt_engine(engine_path)
-context = engine.create_execution_context()
+    def load_engine(self, engine_path):
+        with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
+            return runtime.deserialize_cuda_engine(f.read())
 
-# Allocate Device Memory (Fixing PyCUDA TypeError)
-input_shape = tuple(engine.get_tensor_shape(engine.get_tensor_name(0)))  # ✅ Use new method
-output_shape = tuple(engine.get_tensor_shape(engine.get_tensor_name(1)))  # ✅ Use new method
+    def infer(self, image):
+        # Preprocess and copy to device
+        processed = self.preprocess(image)
+        cuda.memcpy_htod_async(self.d_input, processed, self.stream)
+        
+        # Execute inference
+        self.context.execute_async_v2(
+            bindings=[int(self.d_input), int(self.d_output)],
+            stream_handle=self.stream.handle
+        )
+        
+        # Retrieve results
+        output = np.empty(self.output_shape, dtype=np.float16)
+        cuda.memcpy_dtoh_async(output, self.d_output, self.stream)
+        self.stream.synchronize()
+        
+        return output.flatten()
 
-input_size = int(np.prod(input_shape) * np.dtype(np.float16).itemsize)  
-output_size = int(np.prod(output_shape) * np.dtype(np.float16).itemsize)  
+    def preprocess(self, frame):
+        # Convert to CHW format and normalize
+        frame = cv2.resize(frame, (260, 260), cv2.INTER_AREA).astype(np.float32)
+        frame = frame.transpose(2, 0, 1) / 255.0
+        frame = (frame - np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3,1,1)) \
+              / np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3,1,1)
+        return frame.astype(np.float16).ravel()
 
-d_input = cuda.mem_alloc(input_size)
-d_output = cuda.mem_alloc(output_size)
-stream = cuda.Stream()
+class AutopilotSystem:
+    def __init__(self, model_timestamp):
+        self.controller = HardwareController()
+        self.trt_engine = TensorRTInference(
+            f"models/TensorRT_EfficientNetB2_RGB_{model_timestamp}.trt"
+        )
+        self.fps = 0
+        self.frame_count = 0
+        self.last_time = time.time()
 
-# Ensure the camera is set up
-cam = setup_realsense_camera()
-js = setup_joystick()
-
-ser_pico = None  # Prevents crashes if serial fails
-
-# ✅ **Optimized Image Preprocessing (Fix Normalization Error)**
-def preprocess_image(frame):
-    """
-    EfficientNet-B2 expects 260x260 images with ImageNet normalization.
-    """
-    frame_resized = cv.resize(frame, (260, 260), interpolation=cv.INTER_AREA).astype("float32") / 255.0
-    frame_resized = np.transpose(frame_resized, (2, 0, 1))  # Change to CHW format
-
-    # **✅ Fix Normalization (reshape constants)**
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
-    std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
-    frame_resized = (frame_resized - mean) / std  # ✅ Now correctly broadcasted
-
-    return np.ascontiguousarray(frame_resized, dtype=np.float16)  # Convert to FP16
-
-# Run inference
-def infer_tensorrt(image):
-    """
-    Performs inference using TensorRT with PyCUDA memory management.
-    """
-    np.copyto(cuda.pagelocked_empty(input_shape, dtype=np.float16), image.ravel())
-
-    # Copy data to GPU
-    cuda.memcpy_htod_async(d_input, image, stream)
-    
-    # Run inference
-    context.execute_async_v2(bindings=[int(d_input), int(d_output)], stream_handle=stream.handle)
-
-    # Copy results back
-    output = np.empty(output_shape, dtype=np.float16)
-    cuda.memcpy_dtoh_async(output, d_output, stream)
-    stream.synchronize()
-
-    return output.flatten()
-
-# MAIN LOOP
-is_paused = True
-frame_counts = 0
-prev_time = time()
-frame_count = 0
-fps = 0
-
-try:
-    ser_pico = setup_serial(port='/dev/ttyACM0', baudrate=115200)  # ✅ Serial Setup Moved Inside Try
-except:
-    ser_pico = setup_serial(port='/dev/ttyACM1', baudrate=115200)
-
-try:
-    while True:
-        ret, frame = get_realsense_frame(cam)
-        if not ret or frame is None:
-            print("No frame received. TERMINATE!")
-            break
-
-        for e in pygame.event.get():
-            if e.type == pygame.JOYBUTTONDOWN:
-                if js.get_button(1):  # PAUSE Button
-                    is_paused = not is_paused
-                    print(f"Autopilot {'paused' if is_paused else 'resumed'}")
-                elif js.get_button(0):  # STOP Button
-                    print("E-STOP PRESSED. TERMINATE!")
+    def run(self):
+        try:
+            self.controller.setup_hardware()
+            
+            while True:
+                start_time = time.time()
+                
+                # Get frame from hardware controller
+                frame = self.controller.get_current_frame()
+                if frame is None:
+                    continue
+                
+                # Run inference
+                pred = self.trt_engine.infer(frame)
+                steering, throttle = pred[0], pred[1]
+                
+                # Send controls if not paused
+                if not self.controller.is_paused:
+                    self.controller.send_autopilot_controls(steering, throttle)
+                
+                # Update FPS counter
+                self.update_fps()
+                
+                # Emergency stop check
+                if self.controller.emergency_stop:
                     break
 
-        # Preprocess image
-        img_input = preprocess_image(frame)
+        finally:
+            self.controller.shutdown()
 
-        # Run TensorRT inference
-        pred_st, pred_th = infer_tensorrt(img_input)
+    def update_fps(self):
+        self.frame_count += 1
+        elapsed = time.time() - self.last_time
+        if elapsed > 1.0:
+            self.fps = self.frame_count / elapsed
+            print(f"FPS: {self.fps:.2f} | Steering: {steering:.2f} | Throttle: {throttle:.2f}")
+            self.frame_count = 0
+            self.last_time = time.time()
 
-        # Clip predictions
-        st_trim = max(min(float(pred_st), 0.999), -0.999)
-        th_trim = max(min(float(pred_th), 0.999), -0.999)
-
-        # Encode and send commands
-        if not is_paused:
-            msg = encode_dutycylce(st_trim, th_trim, {})
-        else:
-            msg = encode(0, 0)
-
-        # Send to Pico
-        if ser_pico:
-            ser_pico.write(msg)
-
-        # Calculate frame rate
-        frame_count += 1
-        current_time = time()
-        if current_time - prev_time >= 1.0:
-            fps = frame_count / (current_time - prev_time)
-            print(f"🚀 Autopilot Frame Rate: {fps:.2f} FPS")
-            prev_time = current_time
-            frame_count = 0
-
-except KeyboardInterrupt:
-    print("Terminated by user.")
-finally:
-    pygame.quit()
-    if ser_pico:
-        ser_pico.close()  # ✅ Prevents crashes if serial wasn't initialized
-    cam.stop()
-    cv.destroyAllWindows()
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit("Usage: python autopilot_test.py <model_timestamp>")
+    
+    autopilot = AutopilotSystem(sys.argv[1])
+    autopilot.run()

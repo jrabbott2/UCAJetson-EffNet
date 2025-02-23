@@ -89,49 +89,99 @@ def validate(dataloader, model):
     return total_loss / len(dataloader)
 
 if __name__ == "__main__":
-    # Initialization
-    dataset = BearCartDataset(sys.argv[1]+'/labels.csv', sys.argv[1]+'/rgb_images')
-    train_data, val_data, _ = random_split(dataset, [0.8, 0.1, 0.1])
+    if len(sys.argv) != 2:
+        sys.exit("Usage: python3 scripts/train_test.py <experiment_timestamp>")
     
-    train_loader = DataLoader(train_data, BATCH_SIZE, True, 
-                            num_workers=NUM_WORKERS, collate_fn=collate_fn)
-    val_loader = DataLoader(val_data, BATCH_SIZE, 
-                          num_workers=NUM_WORKERS, collate_fn=collate_fn)
+    # Create data directory paths
+    data_dir = os.path.join('data', sys.argv[1])
+    annotations_file = os.path.join(data_dir, 'labels.csv')
+    img_dir = os.path.join(data_dir, 'rgb_images')
+    os.makedirs(data_dir, exist_ok=True)
+
+    # Initialize dataset
+    dataset = BearCartDataset(annotations_file, img_dir)
+    
+    # Dataset split
+    train_size = int(0.8 * len(dataset))
+    val_size = int(0.1 * len(dataset))
+    test_size = len(dataset) - train_size - val_size
+    train_data, val_data, test_data = random_split(
+        dataset, [train_size, val_size, test_size])
+
+    # DataLoaders
+    train_loader = DataLoader(
+        train_data, batch_size=BATCH_SIZE, shuffle=True,
+        num_workers=NUM_WORKERS, pin_memory=True, collate_fn=collate_fn
+    )
+    val_loader = DataLoader(
+        val_data, batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS, pin_memory=True, collate_fn=collate_fn
+    )
 
     # Model setup
     model = EfficientNetB2(pretrained=True).to(DEVICE)
     optimizer = torch.optim.AdamW([
         {'params': model.base_model.features.parameters(), 'lr': 1e-5},
         {'params': model.base_model.classifier.parameters(), 'lr': 1e-3}
-    ])
+    ], weight_decay=1e-4)
+    
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 'min', patience=2, factor=0.5, verbose=True)
     scaler = GradScaler()
 
     # Training loop
     best_loss = float('inf')
-    train_losses, val_losses = [], []
+    train_losses = []
+    val_losses = []
     
     for epoch in range(1, EPOCHS+1):
         print(f"\nEpoch {epoch}/{EPOCHS}")
+        
+        # Training phase
         train_loss = train_epoch(train_loader, model, optimizer, scaler)
+        train_losses.append(train_loss)
+        
+        # Validation phase
         val_loss = validate(val_loader, model)
+        val_losses.append(val_loss)
         scheduler.step(val_loss)
         
         # Save best model
         if val_loss < best_loss:
             best_loss = val_loss
-            torch.save(model.state_dict(), f"{sys.argv[1]}/best_model.pth")
+            best_model_path = os.path.join(data_dir, 'best_model.pth')
+            torch.save(model.state_dict(), best_model_path)
+            print(f"🏆 New best model saved: {best_model_path}")
         
-        # Save checkpoint and plot
+        # Save checkpoints every 2 epochs
         if epoch % 2 == 0:
-            torch.save(model.state_dict(), f"{sys.argv[1]}/checkpoint_epoch{epoch}.pth")
-            plt.figure()
-            plt.plot(train_losses, label='Train')
-            plt.plot(val_losses, label='Validation')
-            plt.savefig(f"{sys.argv[1]}/training_plot.png")
+            checkpoint_path = os.path.join(data_dir, f'checkpoint_epoch{epoch}.pth')
+            torch.save(model.state_dict(), checkpoint_path)
+            print(f"💾 Checkpoint saved: {checkpoint_path}")
+            
+            # Update training plot
+            plt.figure(figsize=(10, 6))
+            plt.plot(train_losses, label='Training Loss', marker='o')
+            plt.plot(val_losses, label='Validation Loss', marker='x')
+            plt.title('Training Progress')
+            plt.xlabel('Epoch')
+            plt.ylabel('MSE Loss')
+            plt.legend()
+            plt.grid(True)
+            plot_path = os.path.join(data_dir, 'training_progress.png')
+            plt.savefig(plot_path, dpi=300)
             plt.close()
+            print(f"📈 Updated training plot saved")
 
-    # Final export
-    torch.onnx.export(model, torch.randn(1,3,260,260).to(DEVICE), 
-                     f"{sys.argv[1]}/model.onnx", opset_version=13)
+    # Final model export
+    onnx_path = os.path.join(data_dir, 'autopilot.onnx')
+    dummy_input = torch.randn(1, 3, 260, 260).to(DEVICE)
+    torch.onnx.export(
+        model, 
+        dummy_input, 
+        onnx_path,
+        opset_version=13,
+        input_names=['input'],
+        output_names=['steering', 'throttle']
+    )
+    print(f"✅ ONNX model exported to: {onnx_path}")

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torchvision import transforms
 from torchvision.models import efficientnet_b2, EfficientNet_B2_Weights
 
 class EfficientNetB2(nn.Module):

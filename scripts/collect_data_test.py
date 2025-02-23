@@ -64,11 +64,11 @@ def setup_joystick():
 def calculate_controls(ax_val_st, ax_val_th):
     """Convert joystick inputs to duty cycles with proper direction"""
     # Steering calculation (left=-1, right=+1)
-    steering = -ax_val_st  # Remove '-' if steering is reversed
+    steering = -ax_val_st
     duty_st = STEERING_CENTER - STEERING_RANGE + int(STEERING_RANGE * (steering + 1))
 
     # Throttle calculation (forward=+1, reverse=-1)
-    throttle = ax_val_th  # Removed inversion
+    throttle = -ax_val_th  # Removed inversion
     
     if throttle > 0:  # Forward
         duty_th = THROTTLE_STALL + int((THROTTLE_FWD_RANGE - THROTTLE_STALL) * throttle)

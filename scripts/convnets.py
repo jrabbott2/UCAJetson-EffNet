@@ -15,6 +15,13 @@ class EfficientNetB2(nn.Module):
         self.max_throttle = max_throttle
         self.input_size = input_size
         
+        # Built-in preprocessing
+        self.preprocess = transforms.Compose([
+            transforms.Resize(input_size),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                std=[0.229, 0.224, 0.225])
+        ])
+
         # Load pretrained EfficientNet-B2
         self.base_model = efficientnet_b2(weights=EfficientNet_B2_Weights.IMAGENET1K_V1 if pretrained else None)
         
@@ -23,22 +30,28 @@ class EfficientNetB2(nn.Module):
             for param in self.base_model.features.parameters():
                 param.requires_grad = False
 
-        # Custom classifier head
+        # Optimized classifier head for Jetson
         in_features = self.base_model.classifier[1].in_features
         self.base_model.classifier = nn.Sequential(
-            nn.Linear(in_features, 512),
+            nn.Linear(in_features, 256),
             nn.ReLU(),
-            nn.Linear(512, 256),
+            nn.Dropout(0.3),
+            nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(256, 2)  # Steering + throttle
+            nn.Linear(128, 2)  # Steering + throttle
         )
 
     def forward(self, x):
+        # Preprocess if needed
+        x = self.preprocess(x)
+        
+        # EfficientNet forward
         x = self.base_model.features(x)
         x = self.base_model.avgpool(x)
         x = torch.flatten(x, 1)
         x = self.base_model.classifier(x)
         
+        # Output scaling
         steering = torch.tanh(x[:, 0])  # [-1, 1]
         throttle = torch.sigmoid(x[:, 1]) * self.max_throttle  # [0, max_throttle]
         
@@ -49,8 +62,11 @@ def get_model_summary(model):
     from torchsummary import summary
     return summary(model, (3, 260, 260), device='cpu')
 
-def create_optimizer(model, lr=1e-4):
-    return torch.optim.Adam(model.parameters(), lr=lr)
+def create_optimizer(model, base_lr=1e-5, head_lr=1e-3):
+    return torch.optim.Adam([
+        {'params': model.base_model.features.parameters(), 'lr': base_lr},
+        {'params': model.base_model.classifier.parameters(), 'lr': head_lr}
+    ])
 
 # Example Usage
 if __name__ == "__main__":

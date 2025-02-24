@@ -1,200 +1,237 @@
 import os
+import torchvision
 import sys
-import time
-import warnings
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
-from torchvision import transforms
-import cv2
+from torchvision.transforms import v2
 import matplotlib.pyplot as plt
+from torchvision.models import efficientnet_b2
+import cv2 as cv
 import torch.onnx
-from torch.cuda.amp import GradScaler, autocast  # Correct AMP imports
+import time  # For timing epochs
 
-# Suppress matplotlib warnings
-warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
+# Pass in command line arguments for data directory name
+if len(sys.argv) != 2:
+    print('Training script needs data!!!')
+    sys.exit(1)  # Exit with an error code
+else:
+    data_datetime = sys.argv[1]
 
-# Custom model import
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from convnets import EfficientNetB2
-
-# Configuration
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 32 if DEVICE.type == "cuda" else 8
-NUM_WORKERS = min(4, os.cpu_count() - 1)
-IMG_SIZE = (260, 260)
-MEAN = [0.485, 0.456, 0.406]
-STD = [0.229, 0.224, 0.225]
-EPOCHS = 12
+# Check if CUDA is available before setting memory limit
+if torch.cuda.is_available():
+        DEVICE = "cuda"
+else:
+    print("⚠️ CUDA is not available! Falling back to CPU.")
+    DEVICE = "cpu"
 
 class BearCartDataset(Dataset):
+    """
+    Customized dataset for RGB data only.
+    """
     def __init__(self, annotations_file, img_dir):
         self.img_labels = pd.read_csv(annotations_file)
         self.img_dir = img_dir
-        self.transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(MEAN, STD)
+        self.transform = v2.Compose([
+          v2.ToImage(), 
+          v2.ToDtype(torch.float32, scale=True)  # Equivalent to `ToTensor()`
         ])
 
-    def __len__(self): return len(self.img_labels)
+    def __len__(self):
+        return len(self.img_labels)
 
     def __getitem__(self, idx):
-        img_path = os.path.join(self.img_dir, self.img_labels.iloc[idx, 0])
-        try:
-            image = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
-            image = cv2.resize(image, IMG_SIZE, interpolation=cv2.INTER_AREA)
-            return self.transform(image), torch.tensor(
-                self.img_labels.iloc[idx, 1:].values.astype(np.float32),
-                dtype=torch.float32
-            )
-        except Exception as e:
-            print(f"Error loading {img_path}: {str(e)}")
-            return None, None
+        # Load RGB image from column 0 in labels.csv
+        img_name = self.img_labels.iloc[idx, 0]  # Image name from the labels.csv
+        img_path = os.path.join(self.img_dir, img_name)
+        image = cv.imread(img_path, cv.IMREAD_COLOR)
+        if image is None:
+            raise FileNotFoundError(f"Error: Could not read RGB image at {img_path}")
+        image = cv.resize(image, (260, 260), interpolation=cv.INTER_AREA)  # Ensure consistent resolution
 
-def collate_fn(batch):
-    batch = [b for b in batch if b[0] is not None]
-    return torch.utils.data.default_collate(batch)
+        # Convert RGB image to tensor
+        image_tensor = self.transform(image)
 
-def train_epoch(dataloader, model, optimizer, scaler):
+        # Steering and throttle values
+        steering = self.img_labels.iloc[idx, 1].astype(np.float32)
+        throttle = self.img_labels.iloc[idx, 2].astype(np.float32)
+
+        return image_tensor.float(), steering, throttle
+
+import torch
+
+scaler = torch.cuda.amp.GradScaler()  # Initialize gradient scaler
+
+def train(dataloader, model, loss_fn, optimizer, accumulation_steps=4):
     model.train()
-    total_loss, start_time = 0.0, time.time()
-    
-    print(f"\n{'Batch':<8}{'Loss':<15}{'Processed':<20}{'ETA (mm:ss)'}")
-    for b, (x, y) in enumerate(dataloader):
-        x, y = x.to(DEVICE), y.to(DEVICE)
-        
-        with autocast():  # Correct autocast context
-            loss = nn.MSELoss()(model(x), y)
-        
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad()
+    num_used_samples = 0
+    ep_loss = 0.
+    optimizer.zero_grad()  # Zero previous gradient at the start
 
-        # Progress reporting
-        elapsed = time.time() - start_time
-        eta = (len(dataloader)-b-1) * (elapsed/(b+1)) if b > 0 else 0
-        print(f"{b+1:<8}{loss.item():<15.6f}"
-              f"{(b+1)*BATCH_SIZE}/{len(dataloader.dataset):<19}"
-              f"{int(eta//60):02d}:{int(eta%60):02d}")
+    for b, (im, st, th) in enumerate(dataloader):
+        target = torch.stack((st, th), dim=-1)
+        feature, target = im.to("cuda", non_blocking=True), target.to("cuda", non_blocking=True)
 
-        total_loss += loss.item()
-    return total_loss / len(dataloader)
+        # ✅ Enable Mixed Precision Training with Gradient Scaling
+        with torch.amp.autocast("cuda"):
+            pred = model(feature)
+            batch_loss = loss_fn(pred, target)
 
-def validate(dataloader, model):
+        # Scale and accumulate gradients
+        scaler.scale(batch_loss).backward()
+
+        # Perform optimizer step only every `accumulation_steps`
+        if (b + 1) % accumulation_steps == 0 or (b + 1) == len(dataloader):
+            scaler.step(optimizer)               # Step optimizer with scaled gradients
+            scaler.update()                      # Update the scaler
+            optimizer.zero_grad()                # Clear gradients after step
+
+        num_used_samples += target.shape[0]
+        print(f"batch loss: {batch_loss.item()} [{num_used_samples}/{len(dataloader.dataset)}]")
+        ep_loss = (ep_loss * b + batch_loss.item()) / (b + 1)
+
+    return ep_loss
+
+
+def test(dataloader, model, loss_fn):
     model.eval()
-    total_loss = 0.0
+    ep_loss = 0.
     with torch.no_grad():
-        for x, y in dataloader:
-            x, y = x.to(DEVICE), y.to(DEVICE)
-            total_loss += nn.MSELoss()(model(x), y).item()
-    return total_loss / len(dataloader)
+        for b, (im, st, th) in enumerate(dataloader):
+            target = torch.stack((st, th), dim=-1)
+            feature, target = im.to(DEVICE), target.to(DEVICE)
+            pred = model(feature)
+            batch_loss = loss_fn(pred, target)
+            ep_loss = (ep_loss * b + batch_loss.item()) / (b + 1)
+    return ep_loss
 
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("Usage: python3 scripts/train_test.py <experiment_timestamp>")
-    
-    # Create data directory paths
-    data_dir = os.path.join('data', sys.argv[1])
-    annotations_file = os.path.join(data_dir, 'labels.csv')
-    img_dir = os.path.join(data_dir, 'rgb_images')
-    os.makedirs(data_dir, exist_ok=True)
+# Custom loss function (standard MSE)
+def standard_loss(output, target):
+    loss = ((output - target) ** 2).mean()
+    return loss
 
-    # Initialize dataset
-    dataset = BearCartDataset(annotations_file, img_dir)
-    
-    # Dataset split
-    train_size = int(0.8 * len(dataset))
-    val_size = int(0.1 * len(dataset))
-    test_size = len(dataset) - train_size - val_size
-    train_data, val_data, test_data = random_split(
-        dataset, [train_size, val_size, test_size])
+# MAIN
+# Create a dataset
+data_dir = os.path.join(os.path.dirname(sys.path[0]), 'data', data_datetime)
+annotations_file = os.path.join(data_dir, 'labels.csv')
+img_dir = os.path.join(data_dir, 'rgb_images')
+bearcart_dataset = BearCartDataset(annotations_file, img_dir)
+print(f"Data length: {len(bearcart_dataset)}")
 
-    # DataLoaders
-    train_loader = DataLoader(
-        train_data, batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=NUM_WORKERS, pin_memory=True, collate_fn=collate_fn
-    )
-    val_loader = DataLoader(
-        val_data, batch_size=BATCH_SIZE,
-        num_workers=NUM_WORKERS, pin_memory=True, collate_fn=collate_fn
-    )
+# Create training and test dataloaders
+train_size = round(len(bearcart_dataset) * 0.9)
+test_size = len(bearcart_dataset) - train_size
+print(f"Train size: {train_size}, Test size: {test_size}")
+train_data, test_data = random_split(bearcart_dataset, [train_size, test_size])
+train_dataloader = DataLoader(train_data, batch_size=16, pin_memory=True, num_workers=4)
+test_dataloader = DataLoader(test_data, batch_size=16, pin_memory=True, num_workers=4)
 
-    # Model setup
-    model = EfficientNetB2(pretrained=True).to(DEVICE)
-    optimizer = torch.optim.AdamW([
-        {'params': model.base_model.features.parameters(), 'lr': 1e-5},
-        {'params': model.base_model.classifier.parameters(), 'lr': 1e-3}
-    ], weight_decay=1e-4)
-    
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, 'min', patience=2, factor=0.5
-    )
-    
-    scaler = GradScaler()  # Correct GradScaler initialization
+# Uncomment ONE of the following model setups at a time to train and compare weights
 
-    # Training loop
-    best_loss = float('inf')
-    train_losses = []
-    val_losses = []
-    previous_lr = None
-    
-    for epoch in range(1, EPOCHS+1):
-        print(f"\nEpoch {epoch}/{EPOCHS}")
-        
-        # Training phase
-        train_loss = train_epoch(train_loader, model, optimizer, scaler)
-        train_losses.append(train_loss)
-        
-        # Validation phase
-        val_loss = validate(val_loader, model)
-        val_losses.append(val_loss)
-        scheduler.step(val_loss)
-        
-        # Print learning rate changes
-        current_lr = optimizer.param_groups[0]['lr']
-        if previous_lr is not None and current_lr != previous_lr:
-            print(f"Learning rate updated from {previous_lr:.2e} to {current_lr:.2e}")
-        previous_lr = current_lr
-        
-        # Save best model
-        if val_loss < best_loss:
-            best_loss = val_loss
-            best_model_path = os.path.join(data_dir, 'best_model.pth')
-            torch.save(model.state_dict(), best_model_path)
-            print(f"🏆 New best model saved: {best_model_path}")
-        
-        # Save checkpoints every 2 epochs
-        if epoch % 2 == 0:
-            checkpoint_path = os.path.join(data_dir, f'checkpoint_epoch{epoch}.pth')
-            torch.save(model.state_dict(), checkpoint_path)
-            print(f"💾 Checkpoint saved: {checkpoint_path}")
-            
-            # Update training plot
-            plt.figure(figsize=(10, 6))
-            plt.plot(train_losses, label='Training Loss', marker='o')
-            plt.plot(val_losses, label='Validation Loss', marker='x')
-            plt.title('Training Progress')
-            plt.xlabel('Epoch')
-            plt.ylabel('MSE Loss')
-            plt.legend()
-            plt.grid(True)
-            plot_path = os.path.join(data_dir, 'training_progress.png')
-            plt.savefig(plot_path, dpi=300)
-            plt.close()
-            print(f"📈 Updated training plot saved")
+# Model with ImageNet pretrained weights
+print("Training model with ImageNet weights...")
+model = efficientnet_b2(weights=torchvision.models.EfficientNet_B2_Weights.IMAGENET1K_V1).to(DEVICE)
 
-    # Final model export
-    onnx_path = os.path.join(data_dir, 'autopilot.onnx')
-    dummy_input = torch.randn(1, 3, 260, 260).to(DEVICE)
-    torch.onnx.export(
-        model, 
-        dummy_input, 
-        onnx_path,
-        opset_version=13,
-        input_names=['input'],
-        output_names=['steering', 'throttle']
-    )
-    print(f"✅ ONNX model exported to: {onnx_path}")
+# Model with no pretrained weights (training from scratch)
+#print("Training model from scratch (no pretrained weights)...")
+#model = efficientnet_b2(weights=None).to(DEVICE)
+
+# Print the classifier structure before modifying
+print("Original Classifier Structure:")
+print(model.classifier)
+
+# Modify model classifier (Ensure correct index)
+if isinstance(model.classifier, nn.Sequential):
+    if isinstance(model.classifier[0], nn.Linear):  # If first layer is Linear
+        classifier_input_features = model.classifier[0].in_features
+    elif len(model.classifier) > 1 and isinstance(model.classifier[1], nn.Linear):  # If second layer is Linear
+        classifier_input_features = model.classifier[1].in_features
+    else:
+        raise ValueError("Could not determine classifier input features.")
+
+    model.classifier = nn.Sequential(
+        nn.Linear(classifier_input_features, 128),
+        nn.ReLU(),
+        nn.Linear(128, 2)
+    ).to(DEVICE)
+else:
+    raise ValueError("Unexpected classifier structure!")
+
+
+# Hyperparameters
+lr = 0.001
+optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)  # Reduce LR by 10x every 3 epochs
+loss_fn = standard_loss
+epochs = 10
+best_loss = float('inf')
+train_losses = []
+test_losses = []
+
+accumulation_steps = 4  # Accumulate gradients over 4 batches
+
+total_start_time = time.time()  # Start total timer
+
+for t in range(epochs):
+    print(f"Epoch {t + 1}\n-------------------------------")
+    epoch_start_time = time.time()  # Start epoch timer
+
+    ep_train_loss = train(train_dataloader, model, loss_fn, optimizer, accumulation_steps=accumulation_steps)
+    ep_test_loss = test(test_dataloader, model, loss_fn)
+
+    scheduler.step()  # Step the learning rate scheduler
+
+    epoch_end_time = time.time()  # End epoch timer
+    epoch_time = epoch_end_time - epoch_start_time
+    epoch_mins, epoch_secs = divmod(epoch_time, 60)
+    print(f"Epoch {t + 1} Training loss: {ep_train_loss}, Testing loss: {ep_test_loss}")
+    print(f"Epoch {t + 1} took {int(epoch_mins)}m {epoch_secs:.2f}s.")
+
+    train_losses.append(ep_train_loss)
+    test_losses.append(ep_test_loss)
+
+    # Save best model
+    previous_model_path = None
+    if ep_test_loss < best_loss:
+        # Delete previous best model if it exists
+        if previous_model_path and os.path.exists(previous_model_path):
+            os.remove(previous_model_path)
+            print(f"Deleted previous best model: {previous_model_path}")
+        best_loss = ep_test_loss
+        model_name = f'efficientnet_b2-{t+1}ep-{lr}lr-{ep_test_loss:.4f}mse'
+        model_path = os.path.join(data_dir, f'{model_name}.pth')
+        torch.save(model.state_dict(), model_path)
+        previous_model_path = model_path
+        print(f"Best model saved as: {model_path}")
+
+total_end_time = time.time()  # End total timer
+total_time = total_end_time - total_start_time
+total_mins, total_secs = divmod(total_time, 60)
+print(f"Total training time: {int(total_mins)}m {total_secs:.2f}s.")
+
+print("Optimization Done!")
+
+# Graph training process
+plt.plot(range(epochs), train_losses, 'b--', label='Training')
+plt.plot(range(epochs), test_losses, 'orange', label='Test')
+plt.xlabel('Epoch')
+plt.ylabel('MSE Loss')
+plt.grid(True)
+plt.legend()
+plt.title('EfficientNet-B2 Training')
+graph_path = os.path.join(data_dir, 'efficientnet_b2_training.png')
+plt.savefig(graph_path)
+print(f"Training graph saved at: {graph_path}")
+
+# Save final model
+final_model_path = os.path.join(data_dir, 'efficientnet_b2_final.pth')
+torch.save(model.state_dict(), final_model_path)
+print(f"Final model weights saved at: {final_model_path}")
+
+# ONNX export
+dummy_input = torch.randn(1, 3, 260, 260).to(DEVICE)  # Corrected input size
+onnx_model_path = os.path.join(data_dir, 'efficientnet_b2.onnx')
+torch.onnx.export(model, dummy_input, onnx_model_path, opset_version=11)
+print(f"Model exported to ONNX format at: {onnx_model_path}")

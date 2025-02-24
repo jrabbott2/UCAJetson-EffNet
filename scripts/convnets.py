@@ -1,76 +1,55 @@
 import torch
 import torch.nn as nn
-from torchvision import transforms
 from torchvision.models import efficientnet_b2, EfficientNet_B2_Weights
 
 class EfficientNetB2(nn.Module):
-    def __init__(self, 
-                 pretrained=True, 
-                 fine_tune=False, 
-                 max_throttle=1.0,
-                 input_size=(260, 260)):
+    def __init__(self, pretrained=True, fine_tune=True):
         super().__init__()
         
-        # Configuration
-        self.max_throttle = max_throttle
-        self.input_size = input_size
+        # Load EfficientNet-B2 model with pre-trained weights
+        if pretrained:
+            self.base_model = efficientnet_b2(weights=EfficientNet_B2_Weights.IMAGENET1K_V1)
+        else:
+            self.base_model = efficientnet_b2(weights=None)  # Train from scratch
         
-        # Built-in preprocessing
-        self.preprocess = transforms.Compose([
-            transforms.Resize(input_size),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                                std=[0.229, 0.224, 0.225])
-        ])
-
-        # Load pretrained EfficientNet-B2
-        self.base_model = efficientnet_b2(weights=EfficientNet_B2_Weights.IMAGENET1K_V1 if pretrained else None)
-        
-        # Freeze backbone if needed
+        # Freeze feature extractor layers if fine-tuning is disabled
         if pretrained and not fine_tune:
             for param in self.base_model.features.parameters():
                 param.requires_grad = False
 
-        # Optimized classifier head for Jetson
-        in_features = self.base_model.classifier[1].in_features
+        # Adaptive average pooling before classifier for robustness
+        self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
+
+        # Modify classifier for steering & throttle output
         self.base_model.classifier = nn.Sequential(
-            nn.Linear(in_features, 256),
+            nn.Linear(self.base_model.classifier[1].in_features, 256),  # Increase feature size
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(0.2),  # Optimized dropout for 30 FPS
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(128, 2)  # Steering + throttle
+            nn.Dropout(0.2),
+            nn.Linear(128, 2)  # Outputs: steering and throttle
         )
 
     def forward(self, x):
-        # Preprocess if needed
-        x = self.preprocess(x)
-        
-        # EfficientNet forward
-        x = self.base_model.features(x)
-        x = self.base_model.avgpool(x)
-        x = torch.flatten(x, 1)
-        x = self.base_model.classifier(x)
-        
-        # Output scaling
-        steering = torch.tanh(x[:, 0])  # [-1, 1]
-        throttle = torch.sigmoid(x[:, 1]) * self.max_throttle  # [0, max_throttle]
-        
+        output = self.base_model(x)
+        steering = torch.tanh(output[:, 0])  # Range [-1, 1]
+        throttle = torch.sigmoid(output[:, 1])  # Range [0, 1]
         return torch.stack((steering, throttle), dim=1)
 
-# Training Utilities
-def get_model_summary(model):
-    from torchsummary import summary
-    return summary(model, (3, 260, 260), device='cpu')
-
-def create_optimizer(model, base_lr=1e-5, head_lr=1e-3):
-    return torch.optim.Adam([
-        {'params': model.base_model.features.parameters(), 'lr': base_lr},
-        {'params': model.base_model.classifier.parameters(), 'lr': head_lr}
-    ])
-
-# Example Usage
+# Example usage
 if __name__ == "__main__":
-    model = EfficientNetB2(pretrained=True, fine_tune=False, max_throttle=1.0)
-    print(get_model_summary(model))
-    optimizer = create_optimizer(model)
-    criterion = nn.MSELoss()
+    from torchsummary import summary  # For debugging
+    
+    # Instantiate model with pretrained weights
+    model = EfficientNetB2(pretrained=True, fine_tune=False)  # Using ImageNet weights, freezing features
+    
+    # Simulate an input tensor (batch size: 1, channels: 3, image size: 260x260)
+    input_tensor = torch.randn(1, 3, 260, 260)
+    
+    # Forward pass
+    output = model(input_tensor)
+    print("Output:", output)
+    
+    # Print model summary
+    summary(model, (3, 260, 260))

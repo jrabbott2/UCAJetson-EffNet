@@ -120,7 +120,7 @@ try:
 
         # Save data if recording is active
         if is_recording:
-            # Save the RGB image
+            # Save the RGB image as PNG
             cv2.imwrite(os.path.join(image_dir, f"{frame_counts}_rgb.png"), resized_color_image)
 
             # Log joystick values with image name

@@ -6,6 +6,7 @@ import pycuda.autoinit
 import numpy as np
 import tensorrt as trt
 import cv2
+import time
 from hardware_test import HardwareController  # Updated import
 
 # TensorRT Initialization
@@ -85,7 +86,7 @@ class AutopilotSystem:
                     self.controller.send_autopilot_controls(steering, throttle)
                 
                 # Update FPS counter
-                self.update_fps()
+                self.update_fps(steering, throttle)
                 
                 # Emergency stop check
                 if self.controller.emergency_stop:
@@ -94,7 +95,7 @@ class AutopilotSystem:
         finally:
             self.controller.shutdown()
 
-    def update_fps(self):
+    def update_fps(self, steering, throttle):
         self.frame_count += 1
         elapsed = time.time() - self.last_time
         if elapsed > 1.0:

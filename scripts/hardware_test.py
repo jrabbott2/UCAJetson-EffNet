@@ -11,6 +11,8 @@ import time
 
 class HardwareController:
     def __init__(self):
+        self.is_paused = False  # Added missing attribute
+        self.emergency_stop = False  # Added missing attribute
         self.config = self.load_config()
         self.pipeline = None
         self.ser = None
@@ -21,6 +23,25 @@ class HardwareController:
         self.current_controls = (0, 0)
         self.running = True
         self.recording = False
+    def send_autopilot_controls(self, steering, throttle):
+        """Send autopilot control signals to the vehicle"""
+        duty_st, duty_th = self.calculate_duty_cycles(steering, throttle)
+        cmd = f"{duty_st},{duty_th}".encode()
+        self.ser.write(cmd)
+        self.current_controls = (duty_st, duty_th)
+
+    def calculate_duty_cycles(self, steering, throttle):
+        """Convert steering and throttle values to duty cycles"""
+        st = np.clip(-steering, -1.0, 1.0)
+        th = np.clip(-throttle, -1.0, 1.0)
+        params = self.config
+        duty_st = params['steering_center'] - params['steering_range'] + int(params['steering_range'] * (st + 1))
+        if th > 0:
+            duty_th = params['throttle_stall'] + int((params['throttle_fwd_range'] - params['throttle_stall']) * th)
+        else:
+            duty_th = params['throttle_stall'] - int((params['throttle_stall'] - params['throttle_rev_range']) * abs(th))
+        return duty_st, duty_th
+
 
     def load_config(self):
         """Load and validate configuration file"""
@@ -36,6 +57,17 @@ class HardwareController:
         if not required_keys.issubset(config.keys()):
             raise ValueError("Missing required configuration parameters")
         return config
+
+    def setup_hardware(self):
+        """Initialize all hardware components"""
+        self.pipeline = self.setup_camera()
+        self.ser = self.setup_serial()
+        self.js = self.setup_joystick()
+        print("✅ Hardware setup complete")
+        
+        # Start worker threads
+        Thread(target=self.capture_frames, daemon=True).start()
+        Thread(target=self.process_controls, daemon=True).start()
 
     def setup_camera(self):
         """Initialize RealSense camera with error recovery"""
@@ -94,7 +126,7 @@ class HardwareController:
             except Exception as e:
                 print(f"Frame capture error: {e}")
                 time.sleep(0.1)
-
+    
     def process_controls(self):
         """Joystick processing thread with rate limiting"""
         last_send = time.time()
@@ -109,52 +141,6 @@ class HardwareController:
                     if time.time() - last_send > 0.02:  # 50Hz
                         self.send_controls(st, th)
                         last_send = time.time()
-                        
-                elif event.type == pygame.JOYBUTTONDOWN:
-                    self.handle_button(event.button)
-
-    def send_controls(self, steering, throttle):
-        """Thread-safe control command sending"""
-        with self.control_lock:
-            duty_st, duty_th = self.calculate_duty_cycles(steering, throttle)
-            cmd = f"{duty_st},{duty_th}\n".encode()
-            self.ser.write(cmd)
-            self.current_controls = (duty_st, duty_th)
-
-    def calculate_duty_cycles(self, steering, throttle):
-        """Validate and convert joystick inputs to duty cycles"""
-        st = np.clip(-steering, -1.0, 1.0)
-        th = np.clip(-throttle, -1.0, 1.0)
-
-        params = self.config
-        duty_st = params['steering_center'] - params['steering_range'] + \
-                 int(params['steering_range'] * (st + 1))
-
-        if th > 0:
-            duty_th = params['throttle_stall'] + \
-                     int((params['throttle_fwd_range'] - params['throttle_stall']) * th)
-        else:
-            duty_th = params['throttle_stall'] - \
-                     int((params['throttle_stall'] - params['throttle_rev_range']) * abs(th))
-        
-        return duty_st, duty_th
-
-    def handle_button(self, button):
-        """Handle joystick button events"""
-        if button == self.config['record_btn']:
-            self.recording = not self.recording
-            print(f"Recording {'started' if self.recording else 'stopped'}")
-            
-        elif button == self.config['stop_btn']:
-            print("Emergency stop triggered")
-            self.ser.write(b"END,END\n")
-            self.shutdown()
-            
-        elif button == self.config['pause_btn']:
-            print("System paused")
-            while True:
-                if cv2.waitKey(1) != -1:
-                    break
 
     def get_current_frame(self):
         """Thread-safe frame access"""
@@ -164,8 +150,10 @@ class HardwareController:
     def shutdown(self):
         """Graceful shutdown procedure"""
         self.running = False
-        self.pipeline.stop()
-        self.ser.close()
+        if self.pipeline:
+            self.pipeline.stop()
+        if self.ser:
+            self.ser.close()
         pygame.quit()
         cv2.destroyAllWindows()
         print("System shutdown complete")
@@ -174,24 +162,7 @@ if __name__ == "__main__":
     controller = HardwareController()
     
     try:
-        # Hardware initialization
-        controller.pipeline = controller.setup_camera()
-        controller.ser = controller.setup_serial()
-        controller.js = controller.setup_joystick()
-
-        # Start worker threads
-        Thread(target=controller.capture_frames, daemon=True).start()
-        Thread(target=controller.process_controls, daemon=True).start()
-
-        # Main display loop
-        while controller.running:
-            frame = controller.get_current_frame()
-            if frame is not None:
-                cv2.imshow('Camera Feed', frame)
-                
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
+        controller.setup_hardware()
     except Exception as e:
         print(f"Critical error: {e}")
     finally:

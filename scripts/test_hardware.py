@@ -71,6 +71,19 @@ class HardwareController:
         print("✅ Hardware setup complete")
 
     def setup_camera(self):
+        """Ensure camera is initialized properly with error handling"""
+        pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 30)
+        for _ in range(5):  # Increased retries for stability
+            try:
+                pipeline.start(config)
+                print("✅ RealSense camera initialized and streaming")
+                return pipeline
+            except RuntimeError as e:
+                print(f"⚠️ Camera initialization failed: {e}")
+                time.sleep(2)  # Wait before retrying
+        raise RuntimeError("🚨 Failed to initialize camera after multiple attempts!")
         """Initialize RealSense camera with retry mechanism"""
         pipeline = rs.pipeline()
         config = rs.config()

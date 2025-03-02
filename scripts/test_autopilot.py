@@ -5,7 +5,7 @@ import pygame
 import cv2 as cv
 import numpy as np
 import pycuda.driver as cuda
-import pycuda.autinit
+import pycuda.autoinit
 import tensorrt as trt
 from time import time, sleep
 from threading import Thread

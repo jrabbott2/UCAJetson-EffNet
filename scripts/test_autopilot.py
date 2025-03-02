@@ -49,7 +49,11 @@ def allocate_buffers(engine):
         host_mem = cuda.pagelocked_empty(size, dtype)
         device_mem = cuda.mem_alloc(host_mem.nbytes)
         bindings.append(int(device_mem))
+<<<<<<< HEAD
         if engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT:
+=======
+        if engine.binding_is_input(binding):
+>>>>>>> 255b8a3622d4458c945090ee9c8f88e418b03de8
             inputs.append((host_mem, device_mem))
         else:
             outputs.append((host_mem, device_mem))
@@ -66,8 +70,13 @@ fps = 0
 try:
     while True:
         frame = controller.get_current_frame()
+<<<<<<< HEAD
         if frame is None or frame.size == 0:
             print("⚠️ Warning: No frame received. Check camera connection!")
+=======
+        if frame is None:
+            print("No frame received. TERMINATE!")
+>>>>>>> 255b8a3622d4458c945090ee9c8f88e418b03de8
             break
 
         for e in pygame.event.get():

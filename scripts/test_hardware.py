@@ -5,160 +5,116 @@ import pyrealsense2 as rs
 import numpy as np
 import json
 import os
+import sys
+from threading import Thread, Lock
+import time
 
-# Load configuration from test_config.json
-config_path = os.path.join(os.path.dirname(__file__), "test_config.json")
-with open(config_path, "r") as config_file:
-    params = json.load(config_file)
+class HardwareController:
+    def __init__(self):
+        self.config = self.load_config()
+        self.pipeline = None
+        self.ser = None
+        self.js = None
+        self.frame_lock = Lock()
+        self.control_lock = Lock()
+        self.current_frame = None
+        self.current_controls = (0, 0)
+        self.running = True
+        self.is_paused = False
 
+    def load_config(self):
+        """Load and validate configuration file"""
+        config_path = os.path.join(os.path.dirname(__file__), "test_config.json")
+        with open(config_path) as f:
+            config = json.load(f)
+        
+        required_keys = {
+            'steering_joy_axis', 'throttle_joy_axis', 'record_btn',
+            'stop_btn', 'pause_btn', 'steering_center', 'steering_range',
+            'throttle_stall', 'throttle_fwd_range', 'throttle_rev_range'
+        }
+        if not required_keys.issubset(config.keys()):
+            raise ValueError("Missing required configuration parameters")
+        return config
 
-def setup_realsense_camera():
-    """
-    Configure RealSense camera pipeline for RGB stream at 424x240 resolution.
-    """
-    pipeline = rs.pipeline()
-    config = rs.config()
-    config.enable_stream(rs.stream.color, 424, 240, rs.format.bgr8, 30)  # RGB stream at 30 FPS
-    pipeline.start(config)
-    return pipeline
+    def setup_hardware(self):
+        """Initialize camera, serial, and joystick"""
+        self.pipeline = self.setup_camera()
+        self.ser = self.setup_serial()
+        self.js = self.setup_joystick()
+        print("✅ Hardware setup complete")
 
+    def setup_camera(self):
+        """Initialize RealSense camera with retry mechanism"""
+        pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 30)
+        
+        for _ in range(3):  # Retry mechanism
+            try:
+                pipeline.start(config)
+                print("✅ RealSense camera initialized")
+                return pipeline
+            except RuntimeError as e:
+                print(f"Camera initialization failed: {e}")
+                time.sleep(1)
+        raise RuntimeError("Failed to initialize camera after 3 attempts")
 
-def get_realsense_frame(pipeline):
-    """
-    Capture frames from the RealSense camera pipeline.
-    Returns resized color frame as a NumPy array.
-    """
-    frames = pipeline.wait_for_frames()
-    color_frame = frames.get_color_frame()
+    def get_current_frame(self):
+        """Thread-safe frame access"""
+        with self.frame_lock:
+            return self.current_frame.copy() if self.current_frame is not None else None
 
-    if not color_frame:
-        return False, None
+    def send_autopilot_controls(self, steering, throttle):
+        """Thread-safe control command sending"""
+        with self.control_lock:
+            duty_st, duty_th = self.calculate_duty_cycles(steering, throttle)
+            cmd = f"{duty_st},{duty_th}\n".encode()
+            self.ser.write(cmd)
+            self.current_controls = (duty_st, duty_th)
 
-    color_image = np.asanyarray(color_frame.get_data())
+    def calculate_duty_cycles(self, steering, throttle):
+        """Convert steering and throttle values to PWM duty cycles"""
+        st = np.clip(-steering, -1.0, 1.0)
+        th = np.clip(-throttle, -1.0, 1.0)
 
-    # Resize to target resolution (160x120) - matching your test_collect_data setup
-    color_image_resized = cv.resize(color_image, (160, 120))
+        params = self.config
+        duty_st = params['steering_center'] - params['steering_range'] + \
+                 int(params['steering_range'] * (st + 1))
 
-    return True, color_image_resized
+        if th > 0:
+            duty_th = params['throttle_stall'] + \
+                     int((params['throttle_fwd_range'] - params['throttle_stall']) * th)
+        else:
+            duty_th = params['throttle_stall'] - \
+                     int((params['throttle_stall'] - params['throttle_rev_range']) * abs(th))
+        
+        return duty_st, duty_th
 
-
-def setup_serial(port, baudrate=115200):
-    """
-    Initialize a serial connection.
-    """
-    try:
-        ser = serial.Serial(port=port, baudrate=baudrate)
-        print(f"Serial connected on {ser.name}")
-        return ser
-    except serial.SerialException as e:
-        print(f"Error opening serial port {port}: {e}")
-        return None
-
-
-def setup_joystick():
-    """
-    Initialize and return the first detected joystick.
-    """
-    pygame.joystick.init()
-    if pygame.joystick.get_count() == 0:
-        raise Exception("No joystick detected!")
-    js = pygame.joystick.Joystick(0)
-    js.init()
-    print(f"Joystick initialized: {js.get_name()}")
-    return js
-
-
-def encode_dutycylce(ax_val_st, ax_val_th, params):
-    """
-    Calculate duty cycle for steering and throttle based on joystick input.
-    """
-    # Constants from configuration
-    STEERING_CENTER = params['steering_center']
-    STEERING_RANGE = params['steering_range']
-    THROTTLE_STALL = params['throttle_stall']
-    THROTTLE_FWD_RANGE = params['throttle_fwd_range']
-    THROTTLE_REV_RANGE = params['throttle_rev_range']
-
-    # Calculate steering duty cycle
-    act_st = -ax_val_st
-    duty_st = STEERING_CENTER - STEERING_RANGE + int(STEERING_RANGE * (act_st + 1))
-
-    # Calculate throttle duty cycle
-    act_th = -ax_val_th
-    if act_th > 0:
-        duty_th = THROTTLE_STALL + int((THROTTLE_FWD_RANGE - THROTTLE_STALL) * act_th)
-    elif act_th < 0:
-        duty_th = THROTTLE_STALL - int((THROTTLE_STALL - THROTTLE_REV_RANGE) * abs(act_th))
-    else:
-        duty_th = THROTTLE_STALL
-
-    return encode(duty_st, duty_th)
-
-
-def encode(duty_st, duty_th):
-    """
-    Encode steering and throttle values into a message format.
-    """
-    return f"{duty_st},{duty_th}\n".encode('utf-8')
-
+    def shutdown(self):
+        """Graceful shutdown procedure"""
+        self.running = False
+        self.pipeline.stop()
+        self.ser.close()
+        pygame.quit()
+        cv.destroyAllWindows()
+        print("System shutdown complete")
 
 if __name__ == "__main__":
-    # Setup RealSense camera
-    pipeline = setup_realsense_camera()
-
-    # Setup serial communication
-    ser = setup_serial("/dev/ttyUSB0")
-    if not ser:
-        sys.exit(1)
-
-    # Setup joystick
-    js = setup_joystick()
-
-    is_recording = False
-
+    controller = HardwareController()
+    
     try:
-        while True:
-            # Get frames from RealSense camera
-            success, color_frame = get_realsense_frame(pipeline)
-            if not success:
-                continue
-
-            # Display color frame
-            cv.imshow('RGB Stream', color_frame)
-
-            # Handle joystick events
-            for e in pygame.event.get():
-                if e.type == pygame.JOYAXISMOTION:
-                    ax_val_st = js.get_axis(params['steering_joy_axis'])
-                    ax_val_th = js.get_axis(params['throttle_joy_axis'])
-                elif e.type == pygame.JOYBUTTONDOWN:
-                    if e.button == params['record_btn']:
-                        is_recording = not is_recording
-                        print("Recording toggled:", "ON" if is_recording else "OFF")
-                    elif e.button == params['stop_btn']:
-                        print("E-STOP PRESSED!")
-                        ser.write(b"END,END\n")
-                        raise KeyboardInterrupt
-                    elif e.button == params['pause_btn']:
-                        print("Paused")
-                        cv.waitKey(-1)  # Pause until any key is pressed
-
-            # Encode and send steering/throttle commands
-            if 'ax_val_st' in locals() and 'ax_val_th' in locals():
-                msg = encode_dutycylce(ax_val_st, ax_val_th, params)
-                ser.write(msg)
-
-            # Exit the loop if 'q' is pressed
+        controller.setup_hardware()
+        Thread(target=controller.capture_frames, daemon=True).start()
+        
+        while controller.running:
+            frame = controller.get_current_frame()
+            if frame is not None:
+                cv.imshow('Camera Feed', frame)
             if cv.waitKey(1) & 0xFF == ord('q'):
                 break
 
-    except KeyboardInterrupt:
-        print("Exiting program.")
-
+    except Exception as e:
+        print(f"Critical error: {e}")
     finally:
-        # Cleanup resources
-        pipeline.stop()
-        pygame.quit()
-        if ser:
-            ser.close()
-        cv.destroyAllWindows()
+        controller.shutdown()

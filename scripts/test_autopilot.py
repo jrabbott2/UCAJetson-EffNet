@@ -104,6 +104,9 @@ previous_pause_state = None
 
 try:
     while True:
+        pygame.event.pump()
+        print(f"PAUSE_BUTTON State: {js.get_button(PAUSE_BUTTON)}")
+        
         ret, frame = get_realsense_frame(cam)
         if not ret or frame is None:
             print("No frame received. TERMINATE!")

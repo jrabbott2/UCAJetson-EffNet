@@ -105,7 +105,16 @@ previous_pause_state = None
 try:
     while True:
         pygame.event.pump()
-        print(f"PAUSE_BUTTON State: {js.get_button(PAUSE_BUTTON)}")
+        
+        # Detect button press
+        button_state = js.get_button(PAUSE_BUTTON)
+        print(f"PAUSE_BUTTON State: {button_state}")  # Log button state
+        
+        # Toggle pause on button press
+        if button_state:  # Button is pressed
+            is_paused = not is_paused
+            print(f"🟢 Autopilot {'Resumed' if not is_paused else 'Paused'}")  
+            sleep(0.2)  # Prevent rapid toggling
         
         ret, frame = get_realsense_frame(cam)
         if not ret or frame is None:
@@ -142,3 +151,4 @@ finally:
         ser_pico.close()
     pygame.quit()
     print("Autopilot cleanup complete.")
+

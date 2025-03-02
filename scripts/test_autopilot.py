@@ -9,7 +9,7 @@ import pycuda.autoinit
 import tensorrt as trt
 from time import time, sleep
 from threading import Thread
-from test_hardware import get_realsense_frame, setup_realsense_camera, setup_serial, setup_joystick, encode_dutycylce
+from test_hardware import HardwareController
 
 # Adds dummy to run Pygame without a display
 os.environ["SDL_VIDEODRIVER"] = "dummy"
@@ -84,7 +84,7 @@ serial_ports = ["/dev/ttyACM0", "/dev/ttyACM1"]
 
 for port in serial_ports:
     try:
-        ser_pico = setup_serial(port=port, baudrate=115200)
+        ser_pico = HardwareController.setup_serial(port=port, baudrate=115200)
         if ser_pico:
             break
     except:

@@ -50,6 +50,20 @@ class HardwareController:
         raise RuntimeError("No available serial ports found")
 
     def setup_hardware(self):
+        self.pipeline = self.setup_camera()
+        self.ser = self.setup_serial()
+        self.js = self.setup_joystick()
+        print("✅ Hardware setup complete")
+
+    def setup_joystick(self):
+        """Initialize and return the first detected joystick."""
+        pygame.joystick.init()
+        if pygame.joystick.get_count() == 0:
+            raise Exception("No joystick detected!")
+        js = pygame.joystick.Joystick(0)
+        js.init()
+        print(f"✅ Joystick initialized: {js.get_name()}")
+        return js
         """Initialize camera, serial, and joystick"""
         self.pipeline = self.setup_camera()
         self.ser = self.setup_serial()

@@ -21,6 +21,7 @@ class HardwareController:
         self.current_controls = (0, 0)
         self.running = True
         self.is_paused = False
+        self.frame_available = False  # Track frame availability
 
     def load_config(self):
         """Load and validate configuration file"""
@@ -54,6 +55,9 @@ class HardwareController:
         self.ser = self.setup_serial()
         self.js = self.setup_joystick()
         print("✅ Hardware setup complete")
+        
+        # Start frame capture thread
+        Thread(target=self.capture_frames, daemon=True).start()
 
     def setup_joystick(self):
         """Initialize and return the first detected joystick."""
@@ -64,11 +68,6 @@ class HardwareController:
         js.init()
         print(f"✅ Joystick initialized: {js.get_name()}")
         return js
-        """Initialize camera, serial, and joystick"""
-        self.pipeline = self.setup_camera()
-        self.ser = self.setup_serial()
-        self.js = self.setup_joystick()
-        print("✅ Hardware setup complete")
 
     def setup_camera(self):
         """Ensure camera is initialized properly with error handling"""
@@ -84,20 +83,6 @@ class HardwareController:
                 print(f"⚠️ Camera initialization failed: {e}")
                 time.sleep(2)  # Wait before retrying
         raise RuntimeError("🚨 Failed to initialize camera after multiple attempts!")
-        """Initialize RealSense camera with retry mechanism"""
-        pipeline = rs.pipeline()
-        config = rs.config()
-        config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 30)
-        
-        for _ in range(3):  # Retry mechanism
-            try:
-                pipeline.start(config)
-                print("✅ RealSense camera initialized")
-                return pipeline
-            except RuntimeError as e:
-                print(f"Camera initialization failed: {e}")
-                time.sleep(1)
-        raise RuntimeError("Failed to initialize camera after 3 attempts")
 
     def capture_frames(self):
         """Continuously capture frames in a separate thread"""
@@ -110,11 +95,16 @@ class HardwareController:
                 resized = cv.resize(frame, (260, 260), cv.INTER_AREA)
                 with self.frame_lock:
                     self.current_frame = resized
+                    self.frame_available = True  # Mark frame as available
 
     def get_current_frame(self):
-        """Thread-safe frame access"""
+        """Thread-safe frame access, ensure a frame is available before returning"""
         with self.frame_lock:
-            return self.current_frame.copy() if self.current_frame is not None else None
+            if self.frame_available:
+                self.frame_available = False  # Reset flag after reading
+                return self.current_frame.copy()
+            else:
+                return None
 
     def send_autopilot_controls(self, steering, throttle):
         """Thread-safe control command sending"""
@@ -158,7 +148,6 @@ if __name__ == "__main__":
     
     try:
         controller.setup_hardware()
-        Thread(target=controller.capture_frames, daemon=True).start()
         
         while controller.running:
             frame = controller.get_current_frame()

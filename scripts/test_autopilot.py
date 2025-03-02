@@ -30,7 +30,8 @@ controller.setup_hardware()
 
 # Load TensorRT engine
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
-engine_path = "/home/ucajetson/UCAJetson-EffNet/models/TensorRT_EfficientNetB2_RGB.trt"
+data_datetime = sys.argv[1]  # Example: "2025-02-16-15-30"
+engine_path = f"/home/ucajetson/UCAJetson-EffNet/models/TensorRT_EfficientNetB2_RGB_{data_datetime}.trt"
 
 with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
     engine = runtime.deserialize_cuda_engine(f.read())

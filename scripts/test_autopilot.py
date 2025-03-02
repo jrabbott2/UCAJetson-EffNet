@@ -101,20 +101,22 @@ is_paused = True
 previous_steering = None
 previous_throttle = None
 previous_pause_state = None
+prev_button_state = 0  # Track previous button state
 
 try:
     while True:
         pygame.event.pump()
         
-        # Detect button press
+        # Detect button press and print all button states
+        button_states = [js.get_button(i) for i in range(js.get_numbuttons())]
+        print(f"Button States: {button_states}")  # Print all button states
         button_state = js.get_button(PAUSE_BUTTON)
-        print(f"PAUSE_BUTTON State: {button_state}")  # Log button state
-        
-        # Toggle pause on button press
-        if button_state:  # Button is pressed
+
+        if button_state == 1 and prev_button_state == 0:  # Toggle only on new press
             is_paused = not is_paused
             print(f"🟢 Autopilot {'Resumed' if not is_paused else 'Paused'}")  
             sleep(0.2)  # Prevent rapid toggling
+        prev_button_state = button_state  # Store last state
         
         ret, frame = get_realsense_frame(cam)
         if not ret or frame is None:
@@ -151,4 +153,3 @@ finally:
         ser_pico.close()
     pygame.quit()
     print("Autopilot cleanup complete.")
-

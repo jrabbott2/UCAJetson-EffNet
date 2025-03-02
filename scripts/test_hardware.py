@@ -37,11 +37,22 @@ class HardwareController:
             raise ValueError("Missing required configuration parameters")
         return config
 
+    def setup_serial(self):
+        """Initialize serial connection with retry mechanism"""
+        ports = ["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyUSB0", "/dev/ttyUSB1"]
+        for port in ports:
+            try:
+                ser = serial.Serial(port, 115200, timeout=0.1)
+                print(f"✅ Serial connected on {port}")
+                return ser
+            except serial.SerialException:
+                continue
+        raise RuntimeError("No available serial ports found")
+
     def setup_hardware(self):
-        self.ser = self.setup_serial('/dev/ttyACM0', 115200)  # Ensure serial is set up before use
         """Initialize camera, serial, and joystick"""
         self.pipeline = self.setup_camera()
-        self.ser = self.setup_serial('/dev/ttyACM0', 115200)
+        self.ser = self.setup_serial()
         self.js = self.setup_joystick()
         print("✅ Hardware setup complete")
 
@@ -60,6 +71,18 @@ class HardwareController:
                 print(f"Camera initialization failed: {e}")
                 time.sleep(1)
         raise RuntimeError("Failed to initialize camera after 3 attempts")
+
+    def capture_frames(self):
+        """Continuously capture frames in a separate thread"""
+        while self.running:
+            frames = self.pipeline.wait_for_frames()
+            color_frame = frames.get_color_frame()
+            
+            if color_frame:
+                frame = np.asanyarray(color_frame.get_data())
+                resized = cv.resize(frame, (260, 260), cv.INTER_AREA)
+                with self.frame_lock:
+                    self.current_frame = resized
 
     def get_current_frame(self):
         """Thread-safe frame access"""
@@ -93,12 +116,12 @@ class HardwareController:
         return duty_st, duty_th
 
     def shutdown(self):
-        if self.ser:
-            self.ser.close()
         """Graceful shutdown procedure"""
         self.running = False
-        self.pipeline.stop()
-        self.ser.close()
+        if self.pipeline:
+            self.pipeline.stop()
+        if self.ser:
+            self.ser.close()
         pygame.quit()
         cv.destroyAllWindows()
         print("System shutdown complete")

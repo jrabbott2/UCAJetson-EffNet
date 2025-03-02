@@ -7,7 +7,7 @@ import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
 import numpy as np
-from time import time
+from time import time, sleep
 from hardware_test import HardwareController
 
 # Adds dummy to run Pygame without a display
@@ -19,8 +19,6 @@ with open(params_file_path) as params_file:
     params = json.load(params_file)
 
 # Constants
-STEERING_AXIS = params['steering_joy_axis']
-THROTTLE_AXIS = params['throttle_joy_axis']
 PAUSE_BUTTON = params['pause_btn']
 STOP_BUTTON = params['stop_btn']
 
@@ -65,10 +63,13 @@ fps = 0
 # MAIN LOOP
 try:
     while True:
-        frame = controller.get_current_frame()
-        if frame is None or frame.size == 0:
-            print("⚠️ Warning: No frame received. Check camera connection!")
-            break
+        # Ensure we receive valid frames
+        frame = None
+        while frame is None:
+            frame = controller.get_current_frame()
+            if frame is None:
+                print("⚠️ Waiting for valid frame...")
+                sleep(0.05)  # Short delay to prevent excessive CPU usage
 
         for e in pygame.event.get():
             if e.type == pygame.JOYBUTTONDOWN:

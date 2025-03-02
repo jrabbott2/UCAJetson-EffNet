@@ -38,9 +38,10 @@ class HardwareController:
         return config
 
     def setup_hardware(self):
+        self.ser = self.setup_serial('/dev/ttyACM0', 115200)  # Ensure serial is set up before use
         """Initialize camera, serial, and joystick"""
         self.pipeline = self.setup_camera()
-        self.ser = self.setup_serial()
+        self.ser = self.setup_serial('/dev/ttyACM0', 115200)
         self.js = self.setup_joystick()
         print("✅ Hardware setup complete")
 
@@ -92,6 +93,8 @@ class HardwareController:
         return duty_st, duty_th
 
     def shutdown(self):
+        if self.ser:
+            self.ser.close()
         """Graceful shutdown procedure"""
         self.running = False
         self.pipeline.stop()

@@ -7,7 +7,7 @@ import json
 import os
 
 # Load configuration from test_config.json
-config_path = os.path.join(os.path.dirname(__file__), "test_config.json")
+config_path = os.path.join(os.path.dirname(__file__), "config.json")
 with open(config_path, "r") as config_file:
     params = json.load(config_file)
 

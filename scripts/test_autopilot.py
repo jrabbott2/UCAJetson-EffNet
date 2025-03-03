@@ -41,7 +41,7 @@ is_paused = True
 # Load TensorRT engine
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
 data_datetime = sys.argv[1]  # Get the timestamp from command-line argument
-engine_path = f"/home/ucajetson/UCAJetson/models/TensorRT_EfficientNetB2_RGB_{data_datetime}.trt"
+engine_path = f"/home/ucajetson/UCAJetson-EffNet/models/TensorRT_EfficientNetB2_RGB_{data_datetime}.trt"
 
 with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
     engine = runtime.deserialize_cuda_engine(f.read())

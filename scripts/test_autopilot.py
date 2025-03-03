@@ -111,7 +111,7 @@ try:
 
         # Encode and send commands
         if not is_paused:
-            msg = encode_dutycylce(st_trim, th_trim, params)
+            msg = encode_dutycycle(st_trim, th_trim, params)
         else:
             msg = encode(STEERING_CENTER, THROTTLE_STALL)
 

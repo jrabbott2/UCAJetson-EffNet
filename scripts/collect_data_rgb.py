@@ -92,8 +92,8 @@ try:
                 ax_val_th = round(js.get_axis(THROTTLE_AXIS), 2)
             elif e.type == pygame.JOYBUTTONDOWN:
                 if js.get_button(RECORD_BUTTON):
-                    print("Collecting data")
                     is_recording = not is_recording  # Toggle recording
+                    print(f"Recording {'ON' if is_recording else 'OFF'}")
                 elif js.get_button(STOP_BUTTON):
                     print("E-STOP PRESSED. TERMINATE!")
                     msg = ("END,END\n").encode('utf-8')

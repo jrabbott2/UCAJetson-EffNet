@@ -49,8 +49,8 @@ os.makedirs(depth_image_dir, exist_ok=True)
 # Initialize RealSense camera pipeline for RGB and Depth
 pipeline = rs.pipeline()
 config = rs.config()
-config.enable_stream(rs.stream.color, 424, 240, rs.format.bgr8, 30)
-config.enable_stream(rs.stream.depth, 424, 240, rs.format.z16, 30)
+config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 30)
+config.enable_stream(rs.stream.depth, 480, 270, rs.format.z16, 30)
 
 # Start streaming from the camera
 pipeline.start(config)
@@ -84,10 +84,10 @@ try:
         depth_image = np.asanyarray(depth_frame.get_data())
 
         # Resize images
-        resized_color = cv2.resize(color_image, (240, 240))
+        resized_color = cv2.resize(color_image, (260, 260))
         normalized_depth = np.log1p(depth_image)
         normalized_depth = cv2.normalize(normalized_depth, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        resized_depth = cv2.resize(normalized_depth, (240, 240))
+        resized_depth = cv2.resize(normalized_depth, (260, 260))
 
         # Display
         cv2.imshow('RGB', resized_color)

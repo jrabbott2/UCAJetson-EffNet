@@ -49,8 +49,8 @@ os.makedirs(depth_image_dir, exist_ok=True)
 # Initialize RealSense camera pipeline for RGB and Depth
 pipeline = rs.pipeline()
 config = rs.config()
-config.enable_stream(rs.stream.color, 424, 240, rs.format.bgr8, 60)  # RGB stream
-config.enable_stream(rs.stream.depth, 424, 240, rs.format.z16, 60)  # Depth stream
+config.enable_stream(rs.stream.color, 424, 240, rs.format.bgr8, 30)  # RGB stream
+config.enable_stream(rs.stream.depth, 424, 240, rs.format.z16, 30)  # Depth stream
 
 # Start streaming from the camera
 pipeline.start(config)

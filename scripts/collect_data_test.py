@@ -49,8 +49,8 @@ os.makedirs(depth_image_dir, exist_ok=True)
 # Initialize RealSense camera pipeline
 pipeline = rs.pipeline()
 config = rs.config()
-config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 60)  # RGB
-config.enable_stream(rs.stream.depth, 480, 270, rs.format.z16, 60)  # Depth
+config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 30)  # RGB
+config.enable_stream(rs.stream.depth, 480, 270, rs.format.z16, 30)  # Depth
 
 # Start streaming
 pipeline.start(config)
@@ -134,7 +134,7 @@ try:
 
             # Save depth as .png for visualization (scaled to 0-255)
             depth_visual = (depth_image_resized * 255).astype(np.uint8)
-            cv2.imwrite(os.path.join(depth_image_dir, f"{frame_counts}_depth_debug.png"), depth_visual)
+            cv2.imwrite(os.path.join(depth_image_dir, f"{frame_counts}_depth_images.png"), depth_visual)
 
             # Log joystick values with filenames
             with open(label_path, 'a+', newline='') as f:

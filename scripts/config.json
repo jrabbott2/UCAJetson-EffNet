@@ -6,7 +6,7 @@
     "steering_dir": 1,
     "throttle_joy_axis": 1, 
     "throttle_stall": 1500000,
-    "throttle_range": 80000,
+    "throttle_range": 100000,
     "record_btn": 5,
     "stop_btn": 0,
     "pause_btn": 9

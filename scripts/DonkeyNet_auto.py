@@ -19,20 +19,16 @@ pygame.joystick.init()
 js = pygame.joystick.Joystick(0)
 
 # Load configs
-params_file_path = os.path.join(sys.path[0], 'test_config.json')
+params_file_path = os.path.join(sys.path[0], 'config.json')
 with open(params_file_path) as params_file:
     params = json.load(params_file)
 
 # Constants
-STEERING_AXIS = params['steering_joy_axis']
 STEERING_CENTER = params['steering_center']
 STEERING_RANGE = params['steering_range']
-THROTTLE_AXIS = params['throttle_joy_axis']
 THROTTLE_STALL = params['throttle_stall']
-THROTTLE_FWD_RANGE = params['throttle_fwd_range']
-THROTTLE_REV_RANGE = params['throttle_rev_range']
-THROTTLE_LIMIT = params['throttle_limit']
-PAUSE_BUTTON = params['pause_btn']
+THROTTLE_RANGE = params['throttle_range']
+RECORD_BUTTON = params['record_btn']
 STOP_BUTTON = params['stop_btn']
 
 # Initialize hardware

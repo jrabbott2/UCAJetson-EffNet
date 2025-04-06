@@ -1,6 +1,5 @@
 """
 Upload this script to the pico board, then rename it to main.py.
-Read dutycycle in nanoseconds via USB BUS.
 """
 import sys
 import select
@@ -22,7 +21,7 @@ try:
     poller.register(sys.stdin, select.POLLIN)
     event = poller.poll()
 
-    while True:        
+    while True:
         for msg, _ in event:
             buffer = msg.readline().rstrip().split(',')
             # print(buffer) # debug

@@ -20,6 +20,7 @@ STEERING_AXIS = params['steering_joy_axis']
 STEERING_CENTER = params['steering_center']
 STEERING_RANGE = params['steering_range']
 THROTTLE_AXIS = params['throttle_joy_axis']
+THROTTLE_LIMIT = params['throttle_limit']
 THROTTLE_STALL = params['throttle_stall']
 THROTTLE_RANGE = params['throttle_range']
 RECORD_BUTTON = params['record_btn']
@@ -108,9 +109,9 @@ try:
 
         # Refined throttle control with correct forward and reverse mapping
         if act_th > 0:
-            duty_th = THROTTLE_STALL + int(THROTTLE_RANGE * act_th)
+            duty_th = THROTTLE_STALL + int(min(THROTTLE_RANGE * act_th, THROTTLE_RANGE * THROTTLE_LIMIT))
         elif act_th < 0:
-            duty_th = THROTTLE_STALL - int(THROTTLE_RANGE * abs(act_th))
+            duty_th = THROTTLE_STALL - int(min(THROTTLE_RANGE * abs(act_th), THROTTLE_RANGE * THROTTLE_LIMIT))
         else:
             duty_th = THROTTLE_STALL
 

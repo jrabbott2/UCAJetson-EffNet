@@ -1,13 +1,13 @@
 import os
 import sys
 import json
-from test_hardware import get_realsense_frame, setup_realsense_camera, setup_serial, setup_joystick, encode_dutycycle, encode
-import pygame
-import cv2 as cv
+from utils import get_realsense_frame, setup_realsense_camera, setup_serial, setup_joystick, encode_dutycycle, encode
 from time import time
+import pygame
 import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
+import cv2 as cv
 import numpy as np
 
 # Adds dummy to run Pygame without a display
@@ -23,9 +23,10 @@ params_file_path = os.path.join(sys.path[0], 'config.json')
 with open(params_file_path) as params_file:
     params = json.load(params_file)
 
+
 # Constants
-STEERING_CENTER = params['steering_center']
-THROTTLE_STALL = params['throttle_stall']
+# STEERING_CENTER = params['steering_center']
+# THROTTLE_STALL = params['throttle_stall']
 PAUSE_BUTTON = params['pause_btn']
 STOP_BUTTON = params['stop_btn']
 
@@ -42,7 +43,6 @@ is_paused = True
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
 data_datetime = sys.argv[1]  # Get the timestamp from command-line argument
 engine_path = f"/home/ucajetson/UCAJetson-EffNet/models/TensorRT_EfficientNetB2_RGB_{data_datetime}.trt"
-
 with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
     engine = runtime.deserialize_cuda_engine(f.read())
     context = engine.create_execution_context()
@@ -111,10 +111,9 @@ try:
 
         # Encode and send commands
         if not is_paused:
-            msg = encode_dutycycle(st_trim, th_trim, params)
+            msg = encode(st_trim, th_trim, params)
         else:
-            msg = encode(STEERING_CENTER, THROTTLE_STALL)
-
+            msg = encode(0., 0., params)
         ser_pico.write(msg)
 
         # Calculate and print frame rate

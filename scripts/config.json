@@ -4,9 +4,10 @@
     "steering_center": 1415000,
     "steering_range": 450000,
     "steering_dir": 1,
-    "throttle_joy_axis": 1, 
+    "throttle_joy_axis": 1,
+    "throttle_limit": 0.3,
     "throttle_stall": 1500000,
-    "throttle_range": 55000,
+    "throttle_range": 300000,
     "record_btn": 5,
     "stop_btn": 0,
     "pause_btn": 9

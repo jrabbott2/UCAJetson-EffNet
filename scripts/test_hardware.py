@@ -18,7 +18,7 @@ def setup_realsense_camera():
     """
     pipeline = rs.pipeline()
     config = rs.config()
-    config.enable_stream(rs.stream.color, 424, 240, rs.format.bgr8, 30)  # RGB stream at 30 FPS
+    config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 30)  # RGB stream at 30 FPS
     pipeline.start(config)
     return pipeline
 

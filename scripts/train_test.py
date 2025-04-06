@@ -35,23 +35,36 @@ else:
     torch.backends.cudnn.benchmark = True  # Optimize GPU performance
 
 class BearCartDataset(Dataset):
-    """Dataset loader for RGB images and steering/throttle labels."""
-    def __init__(self, annotations_file, img_dir):
+    """Dataset loader for RGB and Depth images along with steering/throttle labels."""
+    def __init__(self, annotations_file, rgb_dir, depth_dir):
         self.img_labels = pd.read_csv(annotations_file)
-        self.img_dir = img_dir
-        self.transform = v2.Compose([
+        self.rgb_dir = rgb_dir
+        self.depth_dir = depth_dir
+        self.transform_rgb = v2.Compose([
             v2.ToImageTensor(),
             v2.ConvertImageDtype(torch.float32)  # Normalize [0, 1]
         ])
-
+        self.transform_depth = v2.Compose([
+            v2.ToImageTensor(),
+            v2.ConvertImageDtype(torch.float32)  # Normalize [0, 1]
+        ])
+    
     def __len__(self):
         return len(self.img_labels)
-
+    
     def __getitem__(self, idx):
         img_name = self.img_labels.iloc[idx, 0]
         img_path = os.path.join(self.img_dir, img_name)
 
-        image = cv.imread(img_path, cv.IMREAD_COLOR)
+        rgb_image = cv.imread(img_path, cv.IMREAD_COLOR)
+        depth_path = os.path.join(self.depth_dir, self.img_labels.iloc[idx, 1].replace('.png', '.npy'))
+        depth_image = np.load(depth_path)
+
+        if rgb_image is None or depth_image is None:
+            raise FileNotFoundError(f"❌ Error: Could not read image {img_path} or {depth_path}")
+
+        depth_image = cv.resize(depth_image, (260, 260), interpolation=cv.INTER_AREA)
+        depth_image = np.expand_dims(depth_image, axis=2)  # Add channel dimension
         if image is None:
             raise FileNotFoundError(f"❌ Error: Could not read image {img_path}")
 
@@ -60,7 +73,7 @@ class BearCartDataset(Dataset):
         labels = self.img_labels.iloc[idx, 1:].values.astype(np.float32)
         labels_tensor = torch.tensor(labels, dtype=torch.float32)
 
-        return self.transform(image), labels_tensor
+        return (self.transform_rgb(rgb_image), self.transform_depth(depth_image)), labels_tensor
 
 # Create dataset paths
 data_dir = os.path.join(os.path.dirname(sys.path[0]), 'data', data_datetime)
@@ -82,19 +95,39 @@ print(f"✅ Dataset loaded. Training size: {train_size}, Testing size: {test_siz
 
 # Load EfficientNet-B2 with pre-trained weights
 print("🔄 Loading EfficientNet-B2 model with pretrained weights...")
-model = efficientnet_b2(weights=EfficientNet_B2_Weights.IMAGENET1K_V1).to(DEVICE)
+rgb_model = efficientnet_b2(weights=EfficientNet_B2_Weights.IMAGENET1K_V1).to(DEVICE)
+depth_model = efficientnet_b2(weights=None).to(DEVICE)
 
 # Modify classifier for steering & throttle
-classifier_input_features = model.classifier[1].in_features
-model.classifier = nn.Sequential(
-    nn.Linear(classifier_input_features, 256),
-    nn.ReLU(),
-    nn.Dropout(0.2),
-    nn.Linear(256, 128),
-    nn.ReLU(),
-    nn.Dropout(0.2),
-    nn.Linear(128, 2)
-).to(DEVICE)
+rgb_features = rgb_model.classifier[1].in_features
+depth_features = depth_model.classifier[1].in_features
+rgb_model.classifier = nn.Identity()
+depth_model.classifier = nn.Identity()
+
+# Feature fusion module
+class FeatureFusionModel(nn.Module):
+    def __init__(self, rgb_model, depth_model):
+        super().__init__()
+        self.rgb_model = rgb_model
+        self.depth_model = depth_model
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(rgb_features + depth_features, 256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 2)
+        )
+    
+    def forward(self, rgb_input, depth_input):
+        rgb_features = self.rgb_model(rgb_input)
+        depth_features = self.depth_model(depth_input)
+        fused_features = torch.cat((rgb_features, depth_features), dim=1)
+        return self.fusion_layer(fused_features)
+
+# Initialize fusion model
+model = FeatureFusionModel(rgb_model, depth_model).to(DEVICE)
 
 # Mixed Precision Training
 scaler = torch.cuda.amp.GradScaler()

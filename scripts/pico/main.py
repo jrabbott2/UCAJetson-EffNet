@@ -30,10 +30,10 @@ try:
             if len(buffer) == 2:
                 try:
                     ns_st, ns_th = int(buffer[0]), int(buffer[1])
+                    # if ns_st == ns_th == 'END':
+                    #     break
                 except ValueError:
                     pass
-                # if ns_st == ns_th == 'END':
-                #     break
                 # print(ns_st, ns_th) # debug
                 steering.duty_ns(ns_st)
                 throttle.duty_ns(ns_th)

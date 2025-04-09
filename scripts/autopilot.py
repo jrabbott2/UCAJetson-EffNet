@@ -1,152 +1,133 @@
-import sys
 import os
+import sys
 import json
+from utils import get_realsense_frame, setup_realsense_camera, setup_serial, setup_joystick, encode_dutycycle, encode
 from time import time
-import torch
-from torchvision import transforms
-import convnets
-import serial
 import pygame
+import tensorrt as trt
+import pycuda.driver as cuda
+import pycuda.autoinit
 import cv2 as cv
-from picamera2 import Picamera2
-from gpiozero import LED
+import numpy as np
 
+# Adds dummy to run Pygame without a display
+os.environ["SDL_VIDEODRIVER"] = "dummy"
 
-# SETUP
-# Load configs and init servo controller
-model_path = os.path.join(
-    os.path.dirname(sys.path[0]),
-    'models', 
-    'DonkeyNet-15epochs-0.001lr.pth'
-)
-to_tensor = transforms.ToTensor()
-model = convnets.DonkeyNet()
-model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
-model.eval()
-# Load configs
-params_file_path = os.path.join(sys.path[0], 'configs.json')
-params_file = open(params_file_path)
-params = json.load(params_file)
-# Constants
-STEERING_CENTER = params['steering_center']
-STEERING_RANGE = params['steering_range']
-THROTTLE_STALL = params['throttle_stall']
-THROTTLE_FWD_RANGE = params['throttle_fwd_range']
-THROTTLE_REV_RANGE = params['throttle_rev_range']
-THROTTLE_LIMIT = params['throttle_limit']
-PAUSE_BUTTON = params['record_btn']
-STOP_BUTTON = params['stop_btn']
-# Init LED
-headlight = LED(params['led_pin'])
-headlight.off()
-# Init serial port
-ser_pico = serial.Serial(port='/dev/ttyACM0', baudrate=115200)
-print(f"Pico is connected to port: {ser_pico.name}")
-# Init controller
+# Initialize Pygame modules
 pygame.display.init()
 pygame.joystick.init()
 js = pygame.joystick.Joystick(0)
-# init camera
-cv.startWindowThread()
-cam = Picamera2()
-cam.configure(
-    cam.create_preview_configuration(
-        main={"format": 'RGB888', "size": (120, 160)},
-        controls={"FrameDurationLimits": (50000, 50000)},  # 20 FPS
-    )
-)
-cam.start()
-for i in reversed(range(60)):
-    frame = cam.capture_array()
-    # cv.imshow("Camera", frame)
-    # cv.waitKey(1)
-    if frame is None:
-        print("No frame received. TERMINATE!")
-        sys.exit()
-    if not i % 20:
-        print(i/20)  # count down 3, 2, 1 sec  
-# Init timer for FPS computing
-start_stamp = time()
-frame_counts = 0
-ave_frame_rate = 0.
-# Init variables
+
+# Load configs
+params_file_path = os.path.join(sys.path[0], 'config.json')
+with open(params_file_path) as params_file:
+    params = json.load(params_file)
+
+
+# Constants
+# STEERING_CENTER = params['steering_center']
+# THROTTLE_STALL = params['throttle_stall']
+PAUSE_BUTTON = params['pause_btn']
+STOP_BUTTON = params['stop_btn']
+
+# Initialize hardware
+try:
+    ser_pico = setup_serial(port='/dev/ttyACM0', baudrate=115200)
+except:
+    ser_pico = setup_serial(port='/dev/ttyACM1', baudrate=115200)
+cam = setup_realsense_camera()
+js = setup_joystick()
 is_paused = True
 
+# Load TensorRT engine
+TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+data_datetime = sys.argv[1]  # Get the timestamp from command-line argument
+engine_path = f"/home/ucajetson/UCAJetson-EffNet/models/TensorRT_EfficientNetB2_RGB_{data_datetime}.trt"
+with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
+    engine = runtime.deserialize_cuda_engine(f.read())
+    context = engine.create_execution_context()
 
-# LOOP
+# Allocate buffers for TensorRT inference
+def allocate_buffers(engine):
+    inputs, outputs, bindings = [], [], []
+    stream = cuda.Stream()
+    for binding in engine:
+        size = trt.volume(engine.get_tensor_shape(binding))
+        dtype = np.float32  # EfficientNet uses FP32
+        host_mem = cuda.pagelocked_empty(size, dtype)
+        device_mem = cuda.mem_alloc(host_mem.nbytes)
+        bindings.append(int(device_mem))
+        if engine.binding_is_input(binding):
+            inputs.append((host_mem, device_mem))
+        else:
+            outputs.append((host_mem, device_mem))
+    return inputs, outputs, bindings, stream
+
+inputs, outputs, bindings, stream = allocate_buffers(engine)
+
+# Frame rate calculation variables
+prev_time = time()
+frame_count = 0
+fps = 0
+
+# MAIN LOOP
 try:
     while True:
-        frame = cam.capture_array()  # read image
-        if frame is None:
+        ret, color_image = get_realsense_frame(cam)  # Capture RGB frame
+        if not ret or color_image is None:
             print("No frame received. TERMINATE!")
-            headlight.close()
-            cv.destroyAllWindows()
-            pygame.quit()
-            ser_pico.close()
-            sys.exit()
-        for e in pygame.event.get():  # read controller input
+            break
+
+        for e in pygame.event.get():
             if e.type == pygame.JOYBUTTONDOWN:
                 if js.get_button(PAUSE_BUTTON):
                     is_paused = not is_paused
-                    print(f"Paused: {is_paused}")
-                    headlight.toggle()
-                elif js.get_button(STOP_BUTTON):  # emergency stop 
+                elif js.get_button(STOP_BUTTON):
                     print("E-STOP PRESSED. TERMINATE!")
-                    headlight.off()
-                    headlight.close()
-                    cv.destroyAllWindows()
-                    pygame.quit()
-                    sys.exit()
-        # predict steer and throttle
-        img_tensor = to_tensor(frame)
-        pred_st, pred_th = model(img_tensor[None, :]).squeeze()
-        st_trim = float(pred_st)
-        if st_trim >= 1:  # trim steering signal
-            st_trim = .999
-        elif st_trim <= -1:
-            st_trim = -.999
-        th_trim = (float(pred_th))
-        if th_trim >= 1:  # trim throttle signal
-            th_trim = .999
-        elif th_trim <= -1:
-            th_trim = -.999
-        # Encode steering value to dutycycle in nanosecond
-        if is_paused:
-            duty_st = STEERING_CENTER
+                    ser_pico.write(b"END,END\n")
+                    raise KeyboardInterrupt
+
+        # Resize and normalize RGB image for EfficientNet
+        color_image_resized = cv.resize(color_image, (260, 260))  # EfficientNet requires 260x260
+        color_image_normalized = color_image_resized.astype(np.float32) / 255.0
+
+        # Convert to TensorRT input format
+        img_tensor = color_image_normalized.transpose(2, 0, 1)  # Convert HWC to CHW
+        img_tensor = np.expand_dims(img_tensor, axis=0)  # Add batch dimension
+
+        # Copy img_tensor to TensorRT input buffer
+        np.copyto(inputs[0][0], img_tensor.ravel())
+
+        # Run inference with TensorRT
+        cuda.memcpy_htod_async(inputs[0][1], inputs[0][0], stream)
+        context.execute_async_v2(bindings=bindings, stream_handle=stream.handle)
+        cuda.memcpy_dtoh_async(outputs[0][0], outputs[0][1], stream)
+        stream.synchronize()
+
+        # Retrieve and process predictions
+        pred_st, pred_th = outputs[0][0][:2]
+        st_trim = max(min(float(pred_st), 0.999), -0.999)
+        th_trim = max(min(float(pred_th), 0.999), -0.999)
+
+        # Encode and send commands
+        if not is_paused:
+            msg = encode(st_trim, th_trim, params)
         else:
-            duty_st = STEERING_CENTER - STEERING_RANGE + int(STEERING_RANGE * (st_trim + 1))
-        # Encode throttle value to dutycycle in nanosecond
-        if is_paused:
-            duty_th = THROTTLE_STALL
-        else:
-            if th_trim > 0:
-                duty_th = THROTTLE_STALL + int(THROTTLE_FWD_RANGE * min(th_trim, THROTTLE_LIMIT))
-            elif th_trim < 0:
-                duty_th = THROTTLE_STALL + int(THROTTLE_REV_RANGE * max(th_trim, -THROTTLE_LIMIT))
-            else:
-                duty_th = THROTTLE_STALL
-        msg = (str(duty_st) + "," + str(duty_th) + "\n").encode('utf-8')
-        # Transmit control signals
+            msg = encode(0., 0., params)
         ser_pico.write(msg)
-        print(f"predicted action: {pred_st, pred_th}")        
-        frame_counts += 1
-        # Log frame rate
-        since_start = time() - start_stamp
-        frame_rate = frame_counts / since_start
-        print(f"frame rate: {frame_rate}")
-        if cv.waitKey(1)==ord('q'):
-            headlight.off()
-            headlight.close()
-            cv.destroyAllWindows()
-            pygame.quit()
-            ser_pico.close()
-            sys.exit()
- 
-# Take care terminate signal (Ctrl-c)
+
+        # Calculate and print frame rate
+        frame_count += 1
+        current_time = time()
+        if current_time - prev_time >= 1.0:
+            fps = frame_count / (current_time - prev_time)
+            print(f"Autopilot Frame Rate: {fps:.2f} FPS")
+            prev_time = current_time
+            frame_count = 0
+
 except KeyboardInterrupt:
-    headlight.off()
-    headlight.close()
-    cv.destroyAllWindows()
-    pygame.quit()
+    print("Terminated by user.")
+finally:
+    pygame.joystick.quit()
     ser_pico.close()
-    sys.exit()
+    cv.destroyAllWindows()

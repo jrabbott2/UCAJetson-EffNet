@@ -2,48 +2,75 @@ import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
 import os
+import sys
 
-# Path to your ONNX model
-onnx_model_path = "/home/ucajetson/UCAJetson/data/2024-12-10-19-19/EfficientNetB2_RGBD-15ep-0.002lr-0.0051mse.onnx"  # Update ONNX file path
-trt_engine_path = "/home/ucajetson/UCAJetson/models/TensorRT_EfficientNetB2_RGBD.trt"  # The output TensorRT engine file
+# Ensure correct usage
+if len(sys.argv) != 2:
+    print("Error: Specify the data folder name for conversion!")
+    sys.exit(1)
+else:
+    data_datetime = sys.argv[1]  # Example: "2025-02-05-14-30"
 
+# Define paths
+onnx_model_path = f"/home/ucajetson/UCAJetson-EffNet/data/{data_datetime}/efficientnet_b2_rgbd.onnx"
+output_dir = "/home/ucajetson/UCAJetson-EffNet/models/"
+os.makedirs(output_dir, exist_ok=True)
+trt_engine_path = os.path.join(output_dir, f"TensorRT_EfficientNetB2_RGBD_{data_datetime}.trt")
+
+# TensorRT logger
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
 
 # Function to convert ONNX to TensorRT
 def build_engine(onnx_file_path, engine_file_path):
+    if not os.path.exists(onnx_file_path):
+        print(f"Error: ONNX model not found at {onnx_file_path}. Ensure training was completed!")
+        return None
+
     with trt.Builder(TRT_LOGGER) as builder, \
          builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)) as network, \
          trt.OnnxParser(network, TRT_LOGGER) as parser:
-        
-        # Create the config object and set max_workspace_size here
-        config = builder.create_builder_config()
-        config.max_workspace_size = 1 << 30  # 1GB workspace
-        builder.max_batch_size = 1
 
-        # Parse the ONNX file
+        # Create builder config
+        config = builder.create_builder_config()
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 31)  # 2GB workspace
+        profile = builder.create_optimization_profile()
+
+        # Disable FP16 mode (force FP32)
+        print("Forcing FP32 precision for TensorRT optimization.")
+
+        # Parse the ONNX model
         with open(onnx_file_path, "rb") as model:
             if not parser.parse(model.read()):
-                print("Failed to parse the ONNX file")
+                print("Failed to parse the ONNX file.")
                 for error in range(parser.num_errors):
                     print(parser.get_error(error))
                 return None
 
-        # Validate input shape
-        input_shape = network.get_input(0).shape
-        expected_shape = (-1, 4, 240, 240)  # Batch size -1 (dynamic), RGB-D channels, 240x240 resolution
-        if input_shape != expected_shape:
-            print(f"Error: The ONNX model's input shape {input_shape} does not match the expected shape {expected_shape}.")
+        # Validate input tensor shape
+        input_tensor = network.get_input(0)
+        expected_shape = (1, 4, 260, 260)  # Static batch size, 4-channel RGB-D, 260x260
+        if input_tensor.shape != expected_shape:
+            print(f"Error: ONNX model's input shape {input_tensor.shape} does not match expected {expected_shape}.")
             return None
         else:
-            print(f"Input shape is correct: {input_shape}")
+            print(f"Input shape confirmed: {input_tensor.shape}")
 
-        # Build the TensorRT engine with the config
-        print("Building TensorRT engine. This may take a few minutes...")
-        engine = builder.build_engine(network, config)
+        # Define optimization profile (static batch size for 30 FPS efficiency)
+        profile.set_shape(input_tensor.name, expected_shape, expected_shape, expected_shape)
+        config.add_optimization_profile(profile)
+
+        # Build TensorRT engine
+        print("Building TensorRT engine... This may take a few minutes.")
+        try:
+            engine = builder.build_serialized_network(network, config)
+        except Exception as e:
+            print(f"Error during engine building: {e}")
+            return None
+
         if engine:
             with open(engine_file_path, "wb") as f:
-                f.write(engine.serialize())
-            print(f"TensorRT engine saved to {engine_file_path}")
+                f.write(engine)
+            print(f"TensorRT engine successfully saved to: {engine_file_path}")
         else:
             print("Failed to build the TensorRT engine.")
         return engine

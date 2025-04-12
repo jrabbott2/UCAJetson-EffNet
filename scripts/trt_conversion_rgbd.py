@@ -12,7 +12,7 @@ else:
     data_datetime = sys.argv[1]  # Example: "2025-02-05-14-30"
 
 # Define paths
-onnx_model_path = f"/home/ucajetson/UCAJetson-EffNet/data/{data_datetime}/efficientnet_b2_rgbd.onnx"
+onnx_model_path = f"/home/ucajetson/UCAJetson-EffNet/data/{data_datetime}/efficientnet_b2.onnx"
 output_dir = "/home/ucajetson/UCAJetson-EffNet/models/"
 os.makedirs(output_dir, exist_ok=True)
 trt_engine_path = os.path.join(output_dir, f"TensorRT_EfficientNetB2_RGBD_{data_datetime}.trt")

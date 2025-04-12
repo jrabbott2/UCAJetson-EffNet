@@ -40,11 +40,8 @@ js = pygame.joystick.Joystick(0)
 # Initialize storage for saving data
 data_dir = os.path.join('data', datetime.now().strftime("%Y-%m-%d-%H-%M"))
 image_dir = os.path.join(data_dir, 'rgb_images/')
-image_dir_2 = os.path.join(data_dir, 'rgb_images_2/')
 label_path = os.path.join(data_dir, 'labels.csv')
-label_path_2 = os.path.join(data_dir, 'labels_2.csv')
 os.makedirs(image_dir, exist_ok=True)
-os.makedirs(image_dir_2, exist_ok=True)
 
 # Initialize RealSense camera pipeline for RGB only
 pipeline = rs.pipeline()
@@ -83,7 +80,6 @@ try:
 
         # Resize to 260x260 for EfficientNet-B2
         resized_color_image = cv2.resize(color_image, (260, 260), interpolation=cv2.INTER_AREA)
-        resized_color_image_2 = cv2.resize(color_image, (160,120), interpolation=cv2.INTER_AREA)
 
         # Display the RGB image
         cv2.imshow('RealSense Stream - RGB Only', resized_color_image)
@@ -125,14 +121,9 @@ try:
         if is_recording:
             # Save the RGB image as PNG
             cv2.imwrite(os.path.join(image_dir, f"{frame_counts}_rgb.png"), resized_color_image)
-            cv2.imwrite(os.path.join(image_dir_2, f"{frame_counts}_rgb.png"), resized_color_image_2)
 
             # Log joystick values with image name
             with open(label_path, 'a+', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([f"{frame_counts}_rgb.png", ax_val_st, ax_val_th])
-            
-            with open(label_path_2, 'a+', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([f"{frame_counts}_rgb.png", ax_val_st, ax_val_th])
 

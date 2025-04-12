@@ -21,9 +21,7 @@ STEERING_CENTER = params['steering_center']
 STEERING_RANGE = params['steering_range']
 THROTTLE_AXIS = params['throttle_joy_axis']
 THROTTLE_STALL = params['throttle_stall']
-THROTTLE_FWD_RANGE = params['throttle_fwd_range']
-THROTTLE_REV_RANGE = params['throttle_rev_range']
-THROTTLE_LIMIT = params['throttle_limit']
+THROTTLE_RANGE = params['throttle_range']
 RECORD_BUTTON = params['record_btn']
 STOP_BUTTON = params['stop_btn']
 
@@ -110,17 +108,19 @@ try:
                     ser_pico.write(b"END,END\n")
                     raise KeyboardInterrupt
 
-        # Calculate PWM values for steering and throttle
+        # Calculate steering and throttle values
         act_st = -ax_val_st
-        act_th = -ax_val_th
+        act_th = -ax_val_th  # throttle action: -1: max forward, 1: max backward
 
+        # Refined throttle control with correct forward and reverse mapping
         if act_th > 0:
-            duty_th = THROTTLE_STALL + int((THROTTLE_FWD_RANGE - THROTTLE_STALL) * act_th)
+            duty_th = THROTTLE_STALL + int(THROTTLE_RANGE * act_th)
         elif act_th < 0:
-            duty_th = THROTTLE_STALL - int((THROTTLE_STALL - THROTTLE_REV_RANGE) * abs(act_th))
+            duty_th = THROTTLE_STALL - int(THROTTLE_RANGE * abs(act_th))
         else:
             duty_th = THROTTLE_STALL
 
+        # Encode steering values
         duty_st = STEERING_CENTER - STEERING_RANGE + int(STEERING_RANGE * (act_st + 1))
 
         # Send control signals to microcontroller

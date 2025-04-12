@@ -18,7 +18,7 @@ def setup_realsense_camera():
     """
     pipeline = rs.pipeline()
     config = rs.config()
-    config.enable_stream(rs.stream.color, 424, 240, rs.format.bgr8, 30)  # RGB stream at 30 FPS
+    config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 30)  # RGB stream at 30 FPS
     pipeline.start(config)
     return pipeline
 
@@ -72,17 +72,16 @@ def encode_dutycycle(ax_val_st, ax_val_th, params):
     STEERING_CENTER = params['steering_center']
     STEERING_RANGE = params['steering_range']
     THROTTLE_STALL = params['throttle_stall']
-    THROTTLE_FWD_RANGE = params['throttle_fwd_range']
-    THROTTLE_REV_RANGE = params['throttle_rev_range']
+    THROTTLE_RANGE = params['throttle_range']
 
     act_st = -ax_val_st
     duty_st = STEERING_CENTER - STEERING_RANGE + int(STEERING_RANGE * (act_st + 1))
 
     act_th = -ax_val_th
     if act_th > 0:
-        duty_th = THROTTLE_STALL + int((THROTTLE_FWD_RANGE - THROTTLE_STALL) * act_th)
+        duty_th = THROTTLE_STALL + int(THROTTLE_RANGE * act_th)
     elif act_th < 0:
-        duty_th = THROTTLE_STALL - int((THROTTLE_STALL - THROTTLE_REV_RANGE) * abs(act_th))
+        duty_th = THROTTLE_STALL - int(THROTTLE_RANGE * abs(act_th))
     else:
         duty_th = THROTTLE_STALL
 

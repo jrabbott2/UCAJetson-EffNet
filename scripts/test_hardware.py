@@ -6,43 +6,32 @@ import numpy as np
 import json
 import os
 
-# Load configuration from test_config.json
+# Load configuration from config.json
 config_path = os.path.join(os.path.dirname(__file__), "config.json")
 with open(config_path, "r") as config_file:
     params = json.load(config_file)
 
-
 def setup_realsense_camera():
-    """
-    Configure RealSense camera pipeline for RGB stream at 424x240 resolution.
-    """
     pipeline = rs.pipeline()
     config = rs.config()
-    config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 30)  # RGB stream at 30 FPS
+    config.enable_stream(rs.stream.color, 480, 270, rs.format.bgr8, 30)
+    config.enable_stream(rs.stream.depth, 480, 270, rs.format.z16, 30)
     pipeline.start(config)
     return pipeline
 
-
 def get_realsense_frame(pipeline):
-    """
-    Capture frames from the RealSense camera pipeline.
-    Returns resized color frame as a NumPy array.
-    """
     frames = pipeline.wait_for_frames()
     color_frame = frames.get_color_frame()
+    depth_frame = frames.get_depth_frame()
 
-    if not color_frame:
-        return False, None
+    if not color_frame or not depth_frame:
+        return False, None, None
 
     color_image = np.asanyarray(color_frame.get_data())
-    color_image_resized = cv.resize(color_image, (260, 260))  # EfficientNet input resolution
-    return True, color_image_resized
-
+    depth_image = np.asanyarray(depth_frame.get_data())
+    return True, color_image, depth_image
 
 def setup_serial(port, baudrate=115200):
-    """
-    Initialize a serial connection.
-    """
     try:
         ser = serial.Serial(port=port, baudrate=baudrate)
         print(f"Serial connected on {ser.name}")
@@ -51,11 +40,7 @@ def setup_serial(port, baudrate=115200):
         print(f"Error opening serial port {port}: {e}")
         return None
 
-
 def setup_joystick():
-    """
-    Initialize and return the first detected joystick.
-    """
     pygame.joystick.init()
     if pygame.joystick.get_count() == 0:
         raise Exception("No joystick detected!")
@@ -64,11 +49,7 @@ def setup_joystick():
     print(f"Joystick initialized: {js.get_name()}")
     return js
 
-
 def encode_dutycycle(ax_val_st, ax_val_th, params):
-    """
-    Calculate duty cycle for steering and throttle based on joystick input.
-    """
     STEERING_CENTER = params['steering_center']
     STEERING_RANGE = params['steering_range']
     THROTTLE_STALL = params['throttle_stall']
@@ -87,9 +68,5 @@ def encode_dutycycle(ax_val_st, ax_val_th, params):
 
     return encode(duty_st, duty_th)
 
-
 def encode(duty_st, duty_th):
-    """
-    Encode steering and throttle values into a message format.
-    """
     return f"{duty_st},{duty_th}\n".encode('utf-8')

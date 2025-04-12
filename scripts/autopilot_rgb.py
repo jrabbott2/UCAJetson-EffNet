@@ -1,7 +1,7 @@
 import os
 import sys
 import json
-from test_hardware import get_realsense_frame, setup_realsense_camera, setup_serial, setup_joystick, encode_dutycycle, encode
+from hardware_rgb import get_realsense_frame, setup_realsense_camera, setup_serial, setup_joystick, encode_dutycycle, encode
 import pygame
 import cv2 as cv
 from time import time

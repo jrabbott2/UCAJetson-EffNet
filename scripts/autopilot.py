@@ -1,7 +1,7 @@
 import os
 import sys
 import json
-from utils import get_realsense_frame, setup_realsense_camera, setup_serial, setup_joystick, encode_dutycycle, encode
+from utils import get_realsense_frame, setup_realsense_camera, setup_serial, setup_joystick, encode
 from time import time
 import pygame
 import tensorrt as trt
